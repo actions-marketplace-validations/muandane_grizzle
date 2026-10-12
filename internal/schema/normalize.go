@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 var (
@@ -18,12 +19,59 @@ var (
 	// Regexes for boolean and numeric literals with optional parens and casts
 	boolParenRegex = regexp.MustCompile(`^\(?(true|false)(?:::bool(?:ean)?)?\)?$`)
 	numParenRegex  = regexp.MustCompile(`^\(?(-?\d+(?:\.\d+)?)(?:::[\w\."\s]+)?\)?$`)
+
+	// Redundant cast on parenthesized/simple numbers: (0)::numeric or 0::numeric or (-1)::integer
+	numCastParenRegex = regexp.MustCompile(`\(?(-?\d+(?:\.\d+)?)\)?::(?:numeric|decimal|integer|int[248]?|bigint|smallint|float[48]?|double\s+precision)`)
+
+	// Redundant cast on identifiers in parens: (email)::text or (col)::character varying
+	colCastParenRegex = regexp.MustCompile(`\(([a-zA-Z_][a-zA-Z0-9_]*)\)::(?:text|varchar|character\s+varying|char)`)
+
+	// Boolean syntax variations: IS TRUE -> = true, IS FALSE -> = false
+	isTrueRegex     = regexp.MustCompile(`(?i)\bIS\s+TRUE\b`)
+	isFalseRegex    = regexp.MustCompile(`(?i)\bIS\s+FALSE\b`)
+	isNotTrueRegex  = regexp.MustCompile(`(?i)\bIS\s+NOT\s+TRUE\b`)
+	isNotFalseRegex = regexp.MustCompile(`(?i)\bIS\s+NOT\s+FALSE\b`)
+
+	// Default index method in Postgres
+	usingBtreeRegex = regexp.MustCompile(`(?i)\s+USING\s+btree\s+`)
 )
 
-// NormalizeGeneratedExpr sanitizes generated column expressions by stripping outer parentheses and excess whitespace.
+// NormalizeGeneratedExpr sanitizes generated column expressions by stripping outer parentheses,
+// redundant casts, and excess whitespace.
 func NormalizeGeneratedExpr(expr string) string {
-	s := strings.TrimSpace(expr)
-	return StripOuterParens(s)
+	return NormalizeExpression(expr, nil)
+}
+
+// NormalizeGeneratedExprWithMappings sanitizes generated column expressions across schema mappings.
+func NormalizeGeneratedExprWithMappings(expr string, mappings map[string]string, currentSchema ...string) string {
+	return NormalizeExpression(expr, mappings, currentSchema...)
+}
+
+// NormalizeCheckDef standardizes CHECK constraint definitions between live and shadow schemas.
+func NormalizeCheckDef(def string, mappings map[string]string, currentSchema ...string) string {
+	d := strings.TrimSpace(def)
+	if d == "" {
+		return ""
+	}
+	hasNotValid := false
+	if strings.HasSuffix(strings.ToUpper(d), " NOT VALID") {
+		hasNotValid = true
+		d = strings.TrimSpace(d[:len(d)-len(" NOT VALID")])
+	}
+	if strings.HasPrefix(strings.ToUpper(d), "CHECK") {
+		d = strings.TrimSpace(d[5:])
+	}
+	normalized := NormalizeExpression(d, mappings, currentSchema...)
+	res := "CHECK (" + normalized + ")"
+	if hasNotValid {
+		res += " NOT VALID"
+	}
+	return res
+}
+
+// NormalizePolicyExpr standardizes RLS policy USING and WITH CHECK expressions.
+func NormalizePolicyExpr(expr string, mappings map[string]string, currentSchema ...string) string {
+	return NormalizeExpression(expr, mappings, currentSchema...)
 }
 
 // StripOuterParens strips surrounding balanced parentheses while respecting quotes.
@@ -73,6 +121,151 @@ func StripOuterParens(s string) string {
 		}
 	}
 	return s
+}
+
+// NormalizeExpression standardizes SQL expressions across catalog decompile variations,
+// stripping redundant outer/nested parentheses, redundant casts on literals and columns,
+// standardizing boolean comparisons, and resolving schema qualifications.
+func NormalizeExpression(expr string, mappings map[string]string, currentSchema ...string) string {
+	s := strings.TrimSpace(expr)
+	if s == "" {
+		return ""
+	}
+
+	curr := ""
+	if len(currentSchema) > 0 {
+		curr = currentSchema[0]
+	}
+
+	// 1. Unmap shadow schemas
+	for shadow, target := range mappings {
+		if shadow == "" || target == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, shadow+".", target+".")
+		s = strings.ReplaceAll(s, `"`+shadow+`".`, `"`+target+`".`)
+	}
+
+	// 2. Strip current schema prefix on routines / types
+	stripSchemas := make([]string, 0, len(mappings)*2+2)
+	if curr != "" {
+		stripSchemas = append(stripSchemas, curr)
+	}
+	for shadow, target := range mappings {
+		if target != "" && !slices.Contains(stripSchemas, target) {
+			stripSchemas = append(stripSchemas, target)
+		}
+		if shadow != "" && !slices.Contains(stripSchemas, shadow) {
+			stripSchemas = append(stripSchemas, shadow)
+		}
+	}
+	for _, sc := range stripSchemas {
+		if sc == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, "::"+sc+".", "::")
+		s = strings.ReplaceAll(s, "::\""+sc+"\".", "::")
+		s = strings.ReplaceAll(s, "("+sc+".", "(")
+		s = strings.ReplaceAll(s, "(\""+sc+"\".", "(")
+		s = strings.ReplaceAll(s, ","+sc+".", ",")
+		s = strings.ReplaceAll(s, ",\""+sc+"\".", ",")
+	}
+
+	// 3. Strip outer parens
+	s = StripOuterParens(s)
+
+	// 4. Tokenize by string literals so transformations only apply outside quotes
+	var b strings.Builder
+	inSingle, inDouble, escaped := false, false, false
+	start := 0
+
+	applyTransforms := func(text string) string {
+		if text == "" {
+			return ""
+		}
+		leadingSpace := unicode.IsSpace(rune(text[0]))
+		trailingSpace := unicode.IsSpace(rune(text[len(text)-1]))
+
+		t := isTrueRegex.ReplaceAllString(text, "= true")
+		t = isFalseRegex.ReplaceAllString(t, "= false")
+		t = isNotTrueRegex.ReplaceAllString(t, "!= true")
+		t = isNotFalseRegex.ReplaceAllString(t, "!= false")
+
+		t = numCastParenRegex.ReplaceAllString(t, "$1")
+		t = colCastParenRegex.ReplaceAllString(t, "$1")
+
+		words := strings.Fields(t)
+		collapsed := strings.Join(words, " ")
+
+		collapsed = strings.ReplaceAll(collapsed, "( ", "(")
+		collapsed = strings.ReplaceAll(collapsed, " )", ")")
+		collapsed = strings.ReplaceAll(collapsed, " ,", ",")
+
+		res := collapsed
+		if leadingSpace && !strings.HasPrefix(res, " ") {
+			res = " " + res
+		}
+		if trailingSpace && !strings.HasSuffix(res, " ") {
+			res = res + " "
+		}
+		return res
+	}
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			continue
+		}
+		if c == '\'' && !inDouble {
+			if !inSingle {
+				b.WriteString(applyTransforms(s[start:i]))
+				start = i
+				inSingle = true
+			} else {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingle = false
+				quoted := s[start : i+1]
+				start = i + 1
+
+				remaining := s[start:]
+				if after, ok := strings.CutPrefix(remaining, "::"); ok {
+					idx := 0
+					for idx < len(after) && (after[idx] == '_' || after[idx] == '.' || after[idx] == '"' ||
+						(after[idx] >= 'a' && after[idx] <= 'z') ||
+						(after[idx] >= 'A' && after[idx] <= 'Z') ||
+						(after[idx] >= '0' && after[idx] <= '9') ||
+						after[idx] == ' ' || after[idx] == '[' || after[idx] == ']') {
+						idx++
+					}
+					castType := strings.TrimSpace(after[:idx])
+					castLower := strings.ToLower(castType)
+					if castLower == "text" || castLower == "character varying" || strings.HasPrefix(castLower, "varchar") || castLower == "char" {
+						start += len("::") + len(castType)
+					}
+				}
+				b.WriteString(quoted)
+			}
+			continue
+		}
+		if c == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+	}
+	if start < len(s) {
+		b.WriteString(applyTransforms(s[start:]))
+	}
+
+	res := strings.TrimSpace(b.String())
+	return StripOuterParens(res)
 }
 
 // NormalizeType standardizes PostgreSQL data type representations to avoid false-positive diff loops.
@@ -276,10 +469,17 @@ func NormalizeDefinitionWithMappings(def string, mappings map[string]string, cur
 		}
 	}
 
+	// In head: strip default "USING btree " and redundant column casts
+	head = usingBtreeRegex.ReplaceAllString(head, " ")
+	head = colCastParenRegex.ReplaceAllString(head, "$1")
+
 	if hasPred {
-		res = head + pred
+		predCond := strings.TrimSpace(strings.TrimPrefix(pred, " WHERE "))
+		normCond := NormalizeExpression(predCond, mappings, currentSchema...)
+		pred = " WHERE (" + normCond + ")"
+		res = strings.TrimSpace(head) + pred
 	} else {
-		res = head
+		res = strings.TrimSpace(head)
 	}
 
 	return strings.TrimSpace(res)

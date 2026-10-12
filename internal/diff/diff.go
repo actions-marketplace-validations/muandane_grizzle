@@ -30,6 +30,7 @@ type Change struct {
 	TableData         *schema.Table
 	Extension         *schema.Extension
 	Policy            *schema.Policy
+	OldPolicy         *schema.Policy
 	Routine           *schema.Routine
 	Domain            *schema.Domain
 	OldDomain         *schema.Domain
@@ -364,7 +365,7 @@ func DiffWithMappings(live, desired *schema.Schema, targetSchema, shadowSchema s
 					if (lCol.Generated == nil) != (dCol.Generated == nil) {
 						genChanged = true
 					} else if lCol.Generated != nil && dCol.Generated != nil {
-						if schema.NormalizeGeneratedExpr(lCol.Generated.Expr) != schema.NormalizeGeneratedExpr(dCol.Generated.Expr) ||
+						if schema.NormalizeGeneratedExprWithMappings(lCol.Generated.Expr, schemaMappings, targetSchema) != schema.NormalizeGeneratedExprWithMappings(dCol.Generated.Expr, schemaMappings, targetSchema) ||
 							lCol.Generated.Stored != dCol.Generated.Stored {
 							genChanged = true
 						}
@@ -627,7 +628,7 @@ func DiffWithMappings(live, desired *schema.Schema, targetSchema, shadowSchema s
 		// managed: constraints inherited from a partitioned parent are invisible
 		// here (conislocal = false) and are managed through the parent table.
 		for checkName, dCheck := range dTable.Checks {
-			normDef := normalize(dCheck.Definition)
+			normDef := schema.NormalizeCheckDef(dCheck.Definition, schemaMappings, targetSchema)
 			lCheck, inLive := lTable.Checks[checkName]
 			if !inLive {
 				checkCopy := *dCheck
@@ -640,7 +641,7 @@ func DiffWithMappings(live, desired *schema.Schema, targetSchema, shadowSchema s
 					Destructive: false,
 				})
 			} else {
-				normLive := normalize(lCheck.Definition)
+				normLive := schema.NormalizeCheckDef(lCheck.Definition, schemaMappings, targetSchema)
 				baseLive := strings.TrimSuffix(normLive, " NOT VALID")
 				baseDef := strings.TrimSuffix(normDef, " NOT VALID")
 				if baseDef != baseLive {
@@ -721,6 +722,7 @@ func DiffWithMappings(live, desired *schema.Schema, targetSchema, shadowSchema s
 						Schema:      targetSchema,
 						Table:       tblName,
 						Policy:      &polCopy,
+						OldPolicy:   lPol,
 						Destructive: false,
 					})
 				} else {
@@ -1481,6 +1483,29 @@ func diffRLSFlags(targetSchema, tblName string, lTable, dTable *schema.Table) []
 
 // policiesEqual compares live and desired policies with normalized
 // expressions, so whitespace/cast drift does not produce replace churn.
+// normalizeRoles standardizes policy role lists for comparison, treating empty
+// and default "public" roles as equivalent.
+func normalizeRoles(roles []string) []string {
+	if len(roles) == 0 {
+		return []string{"public"}
+	}
+	r := make([]string, 0, len(roles))
+	for _, role := range roles {
+		trimmed := strings.ToLower(strings.TrimSpace(role))
+		if trimmed != "" {
+			r = append(r, trimmed)
+		}
+	}
+	if len(r) == 0 {
+		return []string{"public"}
+	}
+	slices.Sort(r)
+	if len(r) == 1 && r[0] == "public" {
+		return []string{"public"}
+	}
+	return r
+}
+
 func policiesEqual(l, d *schema.Policy, normalize func(string) string) bool {
 	if l == nil || d == nil {
 		return l == d
@@ -1488,17 +1513,13 @@ func policiesEqual(l, d *schema.Policy, normalize func(string) string) bool {
 	if l.Cmd != d.Cmd || l.Permissive != d.Permissive {
 		return false
 	}
-	lRoles := slices.Clone(l.Roles)
-	dRoles := slices.Clone(d.Roles)
-	slices.Sort(lRoles)
-	slices.Sort(dRoles)
-	if !slices.Equal(lRoles, dRoles) {
+	if !slices.Equal(normalizeRoles(l.Roles), normalizeRoles(d.Roles)) {
 		return false
 	}
-	if normalize(l.Using) != normalize(d.Using) {
+	if schema.NormalizePolicyExpr(normalize(l.Using), nil) != schema.NormalizePolicyExpr(normalize(d.Using), nil) {
 		return false
 	}
-	return normalize(l.WithCheck) == normalize(d.WithCheck)
+	return schema.NormalizePolicyExpr(normalize(l.WithCheck), nil) == schema.NormalizePolicyExpr(normalize(d.WithCheck), nil)
 }
 
 // canAlterPolicy reports whether policy drift can be applied via ALTER POLICY.
@@ -1518,9 +1539,6 @@ func canAlterPolicy(l, d *schema.Policy) bool {
 		return false
 	}
 	if strings.TrimSpace(l.WithCheck) != "" && strings.TrimSpace(d.WithCheck) == "" {
-		return false
-	}
-	if len(l.Roles) > 0 && len(d.Roles) == 0 {
 		return false
 	}
 	return true

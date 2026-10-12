@@ -312,7 +312,11 @@ func GenerateCreatePolicySQL(targetSchema, tableName string, p *schema.Policy) s
 	if len(p.Roles) > 0 {
 		quoted := make([]string, 0, len(p.Roles))
 		for _, r := range p.Roles {
-			quoted = append(quoted, fmt.Sprintf("%q", r))
+			if strings.EqualFold(r, "public") {
+				quoted = append(quoted, "public")
+			} else {
+				quoted = append(quoted, fmt.Sprintf("%q", r))
+			}
 		}
 		b.WriteString(" TO " + strings.Join(quoted, ", "))
 	}
@@ -327,7 +331,7 @@ func GenerateCreatePolicySQL(targetSchema, tableName string, p *schema.Policy) s
 }
 
 // GenerateAlterPolicySQL constructs an ALTER POLICY statement for expression and role updates.
-func GenerateAlterPolicySQL(targetSchema, tableName string, p *schema.Policy) string {
+func GenerateAlterPolicySQL(targetSchema, tableName string, p *schema.Policy, oldPolicy ...*schema.Policy) string {
 	if p == nil || p.Name == "" {
 		return ""
 	}
@@ -336,9 +340,15 @@ func GenerateAlterPolicySQL(targetSchema, tableName string, p *schema.Policy) st
 	if len(p.Roles) > 0 {
 		quoted := make([]string, 0, len(p.Roles))
 		for _, r := range p.Roles {
-			quoted = append(quoted, fmt.Sprintf("%q", r))
+			if strings.EqualFold(r, "public") {
+				quoted = append(quoted, "public")
+			} else {
+				quoted = append(quoted, fmt.Sprintf("%q", r))
+			}
 		}
 		b.WriteString(" TO " + strings.Join(quoted, ", "))
+	} else if len(oldPolicy) > 0 && oldPolicy[0] != nil && len(oldPolicy[0].Roles) > 0 {
+		b.WriteString(" TO public")
 	}
 	if strings.TrimSpace(p.Using) != "" {
 		b.WriteString(" USING (" + strings.TrimSpace(p.Using) + ")")
@@ -815,7 +825,7 @@ func RenderChangeWithOpts(targetSchema string, c diff.Change, opts RenderOpts) p
 	case plan.ChangeCreatePolicy:
 		step.SQL = GenerateCreatePolicySQL(effectiveSchema, c.Table, c.Policy)
 	case plan.ChangeAlterPolicy:
-		step.SQL = GenerateAlterPolicySQL(effectiveSchema, c.Table, c.Policy)
+		step.SQL = GenerateAlterPolicySQL(effectiveSchema, c.Table, c.Policy, c.OldPolicy)
 	case plan.ChangeDropPolicy:
 		polName := ""
 		if c.Policy != nil {

@@ -11,11 +11,12 @@ import (
 
 func TestGenerateAlterPolicySQL(t *testing.T) {
 	tests := []struct {
-		name     string
-		schema   string
-		table    string
-		policy   *schema.Policy
-		expected string
+		name      string
+		schema    string
+		table     string
+		policy    *schema.Policy
+		oldPolicy *schema.Policy
+		expected  string
 	}{
 		{
 			name:   "using expression update",
@@ -51,6 +52,31 @@ func TestGenerateAlterPolicySQL(t *testing.T) {
 			expected: `ALTER POLICY "items_rw" ON "public"."items" TO "app_user" USING (tenant_id = 1) WITH CHECK (tenant_id = 1 AND active = true);`,
 		},
 		{
+			name:   "roles with public pseudo-role unquoted",
+			schema: "public",
+			table:  "docs",
+			policy: &schema.Policy{
+				Name:  "docs_select",
+				Roles: []string{"public"},
+				Using: "true",
+			},
+			expected: `ALTER POLICY "docs_select" ON "public"."docs" TO public USING (true);`,
+		},
+		{
+			name:   "reset roles from explicit to default via oldPolicy",
+			schema: "public",
+			table:  "docs",
+			policy: &schema.Policy{
+				Name:  "docs_select",
+				Using: "true",
+			},
+			oldPolicy: &schema.Policy{
+				Name:  "docs_select",
+				Roles: []string{"app_user"},
+			},
+			expected: `ALTER POLICY "docs_select" ON "public"."docs" TO public USING (true);`,
+		},
+		{
 			name:     "nil policy returns empty",
 			schema:   "public",
 			table:    "docs",
@@ -68,7 +94,12 @@ func TestGenerateAlterPolicySQL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := postgres.GenerateAlterPolicySQL(tt.schema, tt.table, tt.policy)
+			var got string
+			if tt.oldPolicy != nil {
+				got = postgres.GenerateAlterPolicySQL(tt.schema, tt.table, tt.policy, tt.oldPolicy)
+			} else {
+				got = postgres.GenerateAlterPolicySQL(tt.schema, tt.table, tt.policy)
+			}
 			if got != tt.expected {
 				t.Errorf("GenerateAlterPolicySQL() = %q, want %q", got, tt.expected)
 			}

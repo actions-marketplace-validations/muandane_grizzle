@@ -499,7 +499,7 @@ type Hazard struct {
 | `Native Types` | Yes | UUID, JSONB, Arrays, Timestamps, Numerics |
 | `Extensions` | Yes | Declarative `CREATE EXTENSION` (desired captured by statement scan; installs best-effort in the shadow tx so extension-provided types compile). Creates are never dropped by default (`AllowDropExtension`) and marked irreversible in exports. `EXTENSION_PRIVILEGE` (WARNING) on create |
 | `Row-Level Security` | Yes | `ENABLE/DISABLE/FORCE ROW LEVEL SECURITY` flags diffed per table (`pg_class`); `RLS_ENABLE` (WARNING) because applying can lock out the app role |
-| `RLS Policies` | Yes | Full lifecycle via `pg_policy` (`CREATE POLICY` / DROP+CREATE replace); drops gated by `AllowDropPolicy` + `DROP_POLICY` (CRITICAL) |
+| `RLS Policies` | Yes | Full lifecycle via `pg_policy`: in-place expression and role drift uses non-destructive `ALTER POLICY`; immutable changes (`FOR` command, `PERMISSIVE`/`RESTRICTIVE`) and drops gated by `AllowDropPolicy` + `DROP_POLICY` (CRITICAL) |
 | `COMMENT ON` | Yes | Table/column comments diffed from `obj_description` / `col_description`; set/clear (`IS '…'` / `IS NULL`) is non-destructive; clearing a non-empty live comment emits `COMMENT_CLEAR` (NOTICE); SQLite ignores comments (no catalog support) |
 | `Functions` | Yes | Managed routines diffed on canonical `pg_get_functiondef` output; body drift → `CREATE OR REPLACE FUNCTION`, signature drift → DROP+CREATE; drops gated by `AllowDropFunction` + `DROP_FUNCTION` (CRITICAL); `SECURITY_DEFINER` (WARNING) without explicit `search_path` |
 | `Procedures` | Yes | Managed like functions (`pg_get_functiondef` is canonical for both); body drift → `CREATE OR REPLACE PROCEDURE`; signature drift → DROP+CREATE; drops share the `AllowDropFunction` gate |

@@ -107,6 +107,42 @@ func TestRLS_PolicyLifecycle(t *testing.T) {
 		t.Fatalf("post-alter sync must be a no-op, got %+v", p3.Steps)
 	}
 
+	// 4b. Edit policy roles: ALTER POLICY ... TO public (non-destructive).
+	publicPolicy := `
+		CREATE TABLE docs (
+			id BIGINT PRIMARY KEY,
+			owner_id BIGINT NOT NULL
+		);
+		ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+		CREATE POLICY docs_select_own ON docs FOR SELECT USING (owner_id = 2);
+	`
+	pRole, err := exec.PlanDiffPostgres(ctx, db, newCfg(publicPolicy))
+	if err != nil {
+		t.Fatalf("role edit plan: %v", err)
+	}
+	var sawRoleAlter bool
+	for _, s := range pRole.Steps {
+		if s.Type == plan.ChangeAlterPolicy {
+			sawRoleAlter = true
+			if s.Destructive {
+				t.Errorf("ALTER_POLICY for role update must not be destructive")
+			}
+		}
+	}
+	if !sawRoleAlter {
+		t.Fatalf("expected ALTER_POLICY for role update, got %+v", pRole.Steps)
+	}
+	if err := exec.SyncPostgres(ctx, db, newCfg(publicPolicy)); err != nil {
+		t.Fatalf("role alter sync: %v", err)
+	}
+	pRolePost, err := exec.PlanDiffPostgres(ctx, db, newCfg(publicPolicy))
+	if err != nil {
+		t.Fatalf("post-role-alter plan: %v", err)
+	}
+	if len(pRolePost.Steps) != 0 {
+		t.Fatalf("post-role-alter sync must be a no-op, got %+v", pRolePost.Steps)
+	}
+
 	// 5. Change policy command (SELECT -> ALL): requires DROP + CREATE and triggers destructive gate.
 	cmdPolicy := func(cmd string) string {
 		return fmt.Sprintf(`

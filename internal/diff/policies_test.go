@@ -195,3 +195,77 @@ func TestDiff_PoliciesNotTouchedOnOutOfScopeTables(t *testing.T) {
 		t.Fatalf("out-of-scope table policies must not produce changes, got %+v", changes)
 	}
 }
+
+func TestDiff_PolicyRoleChangeProducesAlterPolicy(t *testing.T) {
+	// Role alteration from explicit role to default public emits ALTER_POLICY
+	liveTable := newTable("docs")
+	liveTable.RLSEnabled = true
+	liveTable.Policies = map[string]*schema.Policy{
+		"docs_read": {Name: "docs_read", Cmd: "SELECT", Roles: []string{"app_user"}, Using: "true"},
+	}
+	desiredTable := newTable("docs")
+	desiredTable.RLSEnabled = true
+	desiredTable.Policies = map[string]*schema.Policy{
+		"docs_read": {Name: "docs_read", Cmd: "SELECT", Roles: nil, Using: "true"}, // reset to public
+	}
+
+	changes, err := diff.Diff(
+		&schema.Schema{Name: "public", Tables: map[string]*schema.Table{"docs": liveTable}},
+		&schema.Schema{Name: "public", Tables: map[string]*schema.Table{"docs": desiredTable}},
+		"public", "", scope.Filters{},
+	)
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 ChangeAlterPolicy, got %d (%+v)", len(changes), changes)
+	}
+	if changes[0].Type != plan.ChangeAlterPolicy {
+		t.Errorf("expected ChangeAlterPolicy, got %s", changes[0].Type)
+	}
+	if changes[0].Destructive {
+		t.Errorf("ALTER_POLICY for role reset must not be destructive")
+	}
+	if changes[0].OldPolicy == nil || len(changes[0].OldPolicy.Roles) == 0 {
+		t.Errorf("expected OldPolicy to be populated with previous roles")
+	}
+}
+
+func TestDiff_PolicyExpressionParensAndCastsNoFalseDiff(t *testing.T) {
+	liveTable := newTable("docs")
+	liveTable.RLSEnabled = true
+	liveTable.Policies = map[string]*schema.Policy{
+		"docs_select": {
+			Name:       "docs_select",
+			Cmd:        "SELECT",
+			Roles:      []string{"public"},
+			Using:      "((user_id = auth.uid()))",
+			WithCheck:  "((status = 'active'::text))",
+			Permissive: true,
+		},
+	}
+	desiredTable := newTable("docs")
+	desiredTable.RLSEnabled = true
+	desiredTable.Policies = map[string]*schema.Policy{
+		"docs_select": {
+			Name:       "docs_select",
+			Cmd:        "SELECT",
+			Roles:      nil, // equivalent to public
+			Using:      "user_id = auth.uid()",
+			WithCheck:  "status = 'active'",
+			Permissive: true,
+		},
+	}
+
+	changes, err := diff.Diff(
+		&schema.Schema{Name: "public", Tables: map[string]*schema.Table{"docs": liveTable}},
+		&schema.Schema{Name: "public", Tables: map[string]*schema.Table{"docs": desiredTable}},
+		"public", "", scope.Filters{},
+	)
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("expected no changes for semantically identical policy expressions, got %d (%+v)", len(changes), changes)
+	}
+}

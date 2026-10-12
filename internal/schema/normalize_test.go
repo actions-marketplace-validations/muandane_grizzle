@@ -200,3 +200,166 @@ func TestIsTypeNarrowing(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeCheckDef(t *testing.T) {
+	tests := []struct {
+		name     string
+		live     string
+		desired  string
+		expected string
+	}{
+		{
+			name:     "extra outer parentheses and numeric cast",
+			live:     "CHECK ((price > (0)::numeric))",
+			desired:  "CHECK (price > 0)",
+			expected: "CHECK (price > 0)",
+		},
+		{
+			name:     "multiple parens and text cast",
+			live:     "CHECK (((status)::text = 'active'::character varying))",
+			desired:  "CHECK (status = 'active')",
+			expected: "CHECK (status = 'active')",
+		},
+		{
+			name:     "not valid preservation",
+			live:     "CHECK ((amount >= 100)) NOT VALID",
+			desired:  "CHECK (amount >= 100) NOT VALID",
+			expected: "CHECK (amount >= 100) NOT VALID",
+		},
+		{
+			name:     "schema unmapping in check",
+			live:     "CHECK (public.valid_range(start_val, end_val))",
+			desired:  "CHECK (_grizzle_shadow.valid_range(start_val, end_val))",
+			expected: "CHECK (valid_range(start_val, end_val))",
+		},
+	}
+
+	mappings := map[string]string{"_grizzle_shadow": "public"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normLive := schema.NormalizeCheckDef(tt.live, mappings, "public")
+			normDesired := schema.NormalizeCheckDef(tt.desired, mappings, "public")
+			if normLive != normDesired {
+				t.Errorf("symmetrical normalization failed:\nlive:    %q\ndesired: %q", normLive, normDesired)
+			}
+			if normLive != tt.expected {
+				t.Errorf("expected canonical %q, got %q", tt.expected, normLive)
+			}
+		})
+	}
+}
+
+func TestNormalizePolicyExpr(t *testing.T) {
+	tests := []struct {
+		name     string
+		live     string
+		desired  string
+		expected string
+	}{
+		{
+			name:     "extra outer parens",
+			live:     "((user_id = auth.uid()))",
+			desired:  "user_id = auth.uid()",
+			expected: "user_id = auth.uid()",
+		},
+		{
+			name:     "text cast on string literal and redundant whitespace",
+			live:     "((tenant_id = 'acme'::text))",
+			desired:  "tenant_id  =  'acme'",
+			expected: "tenant_id = 'acme'",
+		},
+		{
+			name:     "column cast on varchar column",
+			live:     "((role)::text = 'admin')",
+			desired:  "role = 'admin'",
+			expected: "role = 'admin'",
+		},
+		{
+			name:     "boolean comparison variations",
+			live:     "(is_active IS TRUE)",
+			desired:  "is_active = true",
+			expected: "is_active = true",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normLive := schema.NormalizePolicyExpr(tt.live, nil)
+			normDesired := schema.NormalizePolicyExpr(tt.desired, nil)
+			if normLive != normDesired {
+				t.Errorf("policy expr normalization failed:\nlive:    %q\ndesired: %q", normLive, normDesired)
+			}
+			if normLive != tt.expected {
+				t.Errorf("expected canonical %q, got %q", tt.expected, normLive)
+			}
+		})
+	}
+}
+
+func TestNormalizeGeneratedExpr(t *testing.T) {
+	tests := []struct {
+		name     string
+		live     string
+		desired  string
+		expected string
+	}{
+		{
+			name:     "outer parens and numeric literal cast",
+			live:     "(price * (0.1)::numeric)",
+			desired:  "price * 0.1",
+			expected: "price * 0.1",
+		},
+		{
+			name:     "column cast in function call",
+			live:     "(lower((email)::text))",
+			desired:  "lower(email)",
+			expected: "lower(email)",
+		},
+		{
+			name:     "simple addition without redundant casts",
+			live:     "((a + b))",
+			desired:  "a + b",
+			expected: "a + b",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normLive := schema.NormalizeGeneratedExpr(tt.live)
+			normDesired := schema.NormalizeGeneratedExpr(tt.desired)
+			if normLive != normDesired {
+				t.Errorf("generated expr normalization failed:\nlive:    %q\ndesired: %q", normLive, normDesired)
+			}
+			if normLive != tt.expected {
+				t.Errorf("expected canonical %q, got %q", tt.expected, normLive)
+			}
+		})
+	}
+}
+
+func TestNormalizeIndexPredicates(t *testing.T) {
+	shadow := "_grizzle_shadow"
+	target := "public"
+
+	// Predicates with boolean operator drift (IS TRUE vs = true)
+	liveIdx := "CREATE INDEX idx_active ON public.users USING btree (created_at) WHERE (active IS TRUE)"
+	shadowIdx := "CREATE INDEX idx_active ON _grizzle_shadow.users (created_at) WHERE active = true"
+
+	normLive := schema.NormalizeDefinition(liveIdx, shadow, target)
+	normShadow := schema.NormalizeDefinition(shadowIdx, shadow, target)
+
+	if normLive != normShadow {
+		t.Errorf("index definitions with boolean predicate drift did not normalize symmetrically:\nlive:   %q\nshadow: %q", normLive, normShadow)
+	}
+
+	// Functional index expression casts ((lower((email)::text))) vs (lower(email))
+	liveFuncIdx := "CREATE INDEX idx_email ON public.users USING btree ((lower((email)::text)))"
+	shadowFuncIdx := "CREATE INDEX idx_email ON _grizzle_shadow.users ((lower(email)))"
+
+	normLiveFunc := schema.NormalizeDefinition(liveFuncIdx, shadow, target)
+	normShadowFunc := schema.NormalizeDefinition(shadowFuncIdx, shadow, target)
+
+	if normLiveFunc != normShadowFunc {
+		t.Errorf("functional index definitions did not normalize symmetrically:\nlive:   %q\nshadow: %q", normLiveFunc, normShadowFunc)
+	}
+}
