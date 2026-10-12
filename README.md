@@ -110,26 +110,26 @@ grizzle export --plan plan.json --format goose --out ./migrations
 
 ### PostgreSQL (14–18)
 
-| Object Category | Managed Constructs (Declarative Lifecycle) | Protected-Only / Invariant |
+| Category | Supported Capabilities | Safety & Scope Guards |
 | :--- | :--- | :--- |
-| **Tables & Columns** | `CREATE`/`DROP TABLE`, `ADD`/`DROP`/`RENAME COLUMN`, type conversions (`USING`), nullability, defaults, generated columns (`STORED`), partitioned tables (declarative attach/detach). | Identity/serial sequences (`deptype = 'i'`) preserved; full validation scans flagged; unmanaged tables outside scope untouched. |
-| **Indexes & Constraints** | `CREATE INDEX CONCURRENTLY`, partial/unique/expression/BRIN/GIN/GiST indexes; Foreign keys (`NOT VALID` + `VALIDATE`), `CHECK` constraints (staged validation, normalized expressions). | Primary key / unique constraint backing indexes are managed via table/constraint definition. |
-| **Data Types** | Enums (`CREATE`/`ADD VALUE`/`RENAME VALUE`), Domains (`CHECK` constraint alteration), Custom Range Types (`CREATE`/`DROP`), Composite Types (`CREATE`/`ALTER ATTRIBUTE`/`DROP`). | System types; extension-provided types (`deptype = 'e'`); dropped enum labels emit `DROP_ENUM_VALUE` critical hazard. |
-| **Sequences** | Standalone `CREATE SEQUENCE` declared in schema SQL, parameters (`INCREMENT`, `MIN/MAXVALUE`, `CACHE`, `CYCLE`), ownership (`OWNED BY table.col` vs `NONE`), `DROP SEQUENCE IF EXISTS`. | Implicit identity/serial sequences (`deptype = 'i'`); external unmanaged sequences are never auto-dropped. |
-| **Routines & Triggers** | Functions & Procedures (`CREATE OR REPLACE`, signature drift drop/recreate), Triggers (per-table trigger defs), User-defined aggregates (`CREATE AGGREGATE`). | Built-in routines; extension-owned functions (`deptype = 'e'`); window functions (`prokind = 'w'`); ordered-set / hypothetical aggregates (`aggkind != 'd'`). |
-| **Views** | Views (`CREATE OR REPLACE` for append-only columns, drop/create for structural alterations), Materialized Views (drop/recreate + refresh). | System catalogs / unmanaged views. |
-| **Security & Access** | Row-Level Security (`ENABLE`/`FORCE`), RLS Policies (in-place `ALTER POLICY` for roles/USING/WITH CHECK, drop/create for command), Roles & Grants (via `RolesSQL` / `SchemaSQL`). | Unmanaged roles; grants to `PUBLIC` or unmanaged roles are never revoked; marker comment `grizzle-managed` required to drop roles. |
-| **Cluster & Replication** | Extensions (`CREATE EXTENSION`), Logical Publications, Subscriptions, Logical Replication Slots, DDL Event Triggers (via `CatalogSQL` / `SchemaSQL`). | Physical replication slots; unmanaged cluster triggers/publications without `grizzle-managed` marker comment. |
+| **Tables & Columns** | Table creation/drop, column add/drop/rename, type alters (`USING`), nullability, defaults, generated columns, partitioned tables (declarative attach/detach). | Identity and serial sequences preserved; unmanaged tables outside target schema untouched. |
+| **Indexes & Constraints** | `CREATE INDEX CONCURRENTLY`, partial/unique/expression/BRIN/GIN/GiST indexes; foreign keys (`NOT VALID` + `VALIDATE`), `CHECK` constraints (staged validation, normalized expressions). | Backing indexes for primary keys and unique constraints managed via constraint definition. |
+| **Data Types** | Enums (`ADD VALUE`, `RENAME VALUE`), domains (`CHECK` constraints), custom range types, composite types (`ADD`/`DROP ATTRIBUTE`). | System and extension types preserved; dropped enum values flagged as critical hazards. |
+| **Sequences** | Standalone sequences, parameters (`INCREMENT`, `MIN`/`MAXVALUE`, `CACHE`, `CYCLE`), ownership (`OWNED BY table.col`), `DROP SEQUENCE IF EXISTS`. | Implicit identity/serial sequences and unmanaged external sequences are preserved. |
+| **Routines & Triggers** | Functions and procedures (`CREATE OR REPLACE`, signature drift drop/recreate), per-table triggers, user-defined aggregates. | Built-in and extension functions untouched; window functions and hypothetical aggregates preserved. |
+| **Views** | Standard views (`CREATE OR REPLACE` for append-only, drop/recreate for structural alters), materialized views (drop/recreate + refresh). | System catalogs and unmanaged views untouched. |
+| **Security & Access** | Row-Level Security (`ENABLE`/`FORCE`), RLS policies (`CREATE`/`ALTER`/`DROP POLICY`), roles and grants (via `RolesSQL` / `SchemaSQL`). | Unmanaged roles and `PUBLIC` grants preserved; marker comment `grizzle-managed` required to drop roles. |
+| **Cluster & Replication** | Extensions (`CREATE EXTENSION`), logical publications, subscriptions, replication slots, DDL event triggers. | Physical slots and unmanaged publications/triggers without `grizzle-managed` marker are untouched. |
 
 > [!NOTE]
-> **API & Hash Stability:** `Options.Renames`, `Options.ExpandContract`, and `Options.Backfill` API shapes and `Plan.Hash()` inputs are frozen across the `rc` line (stable, no longer experimental). Plan hashes remain strictly deterministic across versions. Full catalog queries, hazard taxonomy, and engine details are documented in [docs/SPEC.md](docs/SPEC.md#3-supported-schema-constructs).
+> Plan hashes (`Plan.Hash()`) are deterministic across versions. Detailed catalog queries, hazard taxonomy, and engine internals are documented in [docs/SPEC.md](docs/SPEC.md).
 
 ### SQLite (3.35+)
 
-* Tables, columns, foreign keys, CHECK constraints, and generated columns.
+* Tables, columns, foreign keys, `CHECK` constraints, indexes, and generated columns.
 * Automatic 12-step table rebuilds for schema changes SQLite cannot execute in-place via `ALTER TABLE`.
 * Supports both `modernc.org/sqlite` (pure Go) and `mattn/go-sqlite3` (CGo).
-* SQLite does not support `COMMENT ON` or Row-Level Security (`ENABLE ROW LEVEL SECURITY`, `CREATE POLICY`); comments are ignored (no catalog metadata) and RLS is PostgreSQL-only.
+* SQLite does not support `COMMENT ON` or Row-Level Security (PostgreSQL-only).
 
 ---
 
