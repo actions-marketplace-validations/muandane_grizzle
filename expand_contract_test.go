@@ -565,3 +565,304 @@ func TestExpandContract_PostgresStagedPlansAndBackfill(t *testing.T) {
 		t.Fatalf("expected 2 members with email, got %d", count)
 	}
 }
+
+func TestExpandContract_MultiColumnAndMultiTableRename(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("failed opening sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+
+	// Initial schema with two tables having columns to rename
+	initSQL := `
+CREATE TABLE users (
+	id INTEGER PRIMARY KEY,
+	first_name TEXT NOT NULL,
+	last_name TEXT NOT NULL
+);
+CREATE TABLE orders (
+	id INTEGER PRIMARY KEY,
+	user_id INTEGER NOT NULL,
+	cost INTEGER NOT NULL
+);
+`
+	err = grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:   grizzle.DialectSQLite,
+		SchemaSQL: initSQL,
+	})
+	if err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	_, err = db.Exec(`
+INSERT INTO users (id, first_name, last_name) VALUES (1, 'Alice', 'Smith'), (2, 'Bob', 'Jones');
+INSERT INTO orders (id, user_id, cost) VALUES (10, 1, 100), (20, 2, 250);
+`)
+	if err != nil {
+		t.Fatalf("failed inserting test data: %v", err)
+	}
+
+	// Desired schema:
+	// users.first_name -> given_name
+	// users.last_name -> family_name
+	// orders.cost -> amount
+	desiredSQL := `
+CREATE TABLE users (
+	id INTEGER PRIMARY KEY,
+	given_name TEXT NOT NULL,
+	family_name TEXT NOT NULL
+);
+CREATE TABLE orders (
+	id INTEGER PRIMARY KEY,
+	user_id INTEGER NOT NULL,
+	amount INTEGER NOT NULL
+);
+`
+
+	renamesMap := map[string]string{
+		"users.first_name": "given_name",
+		"users.last_name":  "family_name",
+		"orders.cost":      "amount",
+	}
+
+	// ==========================================
+	// PLAN 1: Staged Expand
+	// ==========================================
+	plan1, err := grizzle.PlanDiff(ctx, db, grizzle.Options{
+		Dialect:        grizzle.DialectSQLite,
+		SchemaSQL:      desiredSQL,
+		ExpandContract: true,
+		Renames:        renamesMap,
+	})
+	if err != nil {
+		t.Fatalf("PlanDiff plan 1 failed: %v", err)
+	}
+
+	// Verify plan 1 adds the new columns as nullable and has zero drops
+	var addedCols []string
+	for _, s := range plan1.Steps {
+		if s.Type == grizzle.ChangeDropColumn || strings.Contains(s.SQL, "DROP COLUMN") {
+			t.Fatalf("staged expand must not contain drop steps: %+v", s)
+		}
+		if s.Type == grizzle.ChangeAddColumn {
+			addedCols = append(addedCols, s.SQL)
+		}
+	}
+	if len(addedCols) < 3 {
+		t.Fatalf("expected at least 3 ADD COLUMN steps in expand plan, got %d: %+v", len(addedCols), addedCols)
+	}
+
+	// Apply Plan 1 with Backfill hook
+	var backfilledUsers, backfilledOrders int
+	err = grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:        grizzle.DialectSQLite,
+		SchemaSQL:      desiredSQL,
+		ExpandContract: true,
+		Renames:        renamesMap,
+		Backfill: func(ctx context.Context, tx *sql.Tx, table, oldCol, newCol string) error {
+			switch table {
+			case "users":
+				backfilledUsers++
+			case "orders":
+				backfilledOrders++
+			}
+			_, err := tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET %s = %s WHERE %s IS NULL", table, newCol, oldCol, newCol))
+			return err
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply plan 1 with backfill failed: %v", err)
+	}
+	if backfilledUsers == 0 || backfilledOrders == 0 {
+		t.Fatalf("expected both users and orders to be backfilled, got users=%d, orders=%d", backfilledUsers, backfilledOrders)
+	}
+
+	// Verify all data copied
+	var uCount int
+	err = db.QueryRow("SELECT COUNT(*) FROM users WHERE given_name = first_name AND family_name = last_name").Scan(&uCount)
+	if err != nil || uCount != 2 {
+		t.Fatalf("expected 2 backfilled users, got count=%d, err=%v", uCount, err)
+	}
+
+	var oCount int
+	err = db.QueryRow("SELECT COUNT(*) FROM orders WHERE amount = cost").Scan(&oCount)
+	if err != nil || oCount != 2 {
+		t.Fatalf("expected 2 backfilled orders, got count=%d, err=%v", oCount, err)
+	}
+
+	// ==========================================
+	// PLAN 2: Contract
+	// ==========================================
+	trueVal := true
+	plan2, err := grizzle.PlanDiff(ctx, db, grizzle.Options{
+		Dialect:         grizzle.DialectSQLite,
+		SchemaSQL:       desiredSQL,
+		AllowDropColumn: &trueVal,
+		Renames:         renamesMap,
+	})
+	if err != nil {
+		t.Fatalf("PlanDiff plan 2 failed: %v", err)
+	}
+
+	err = grizzle.Apply(ctx, db, plan2, grizzle.ApplyOpts{
+		ExpectedHash: plan2.Hash(),
+		AcceptHazards: []grizzle.HazardCode{
+			grizzle.HazardDropColumn,
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply plan 2 failed: %v", err)
+	}
+
+	// Verify final schema: old columns are gone, new columns present
+	var uCols, oCols int
+	err = db.QueryRow("SELECT COUNT(*) FROM users WHERE given_name IS NOT NULL AND family_name IS NOT NULL").Scan(&uCols)
+	if err != nil || uCols != 2 {
+		t.Fatalf("expected 2 users in final state, got count=%d, err=%v", uCols, err)
+	}
+	err = db.QueryRow("SELECT COUNT(*) FROM orders WHERE amount IS NOT NULL").Scan(&oCols)
+	if err != nil || oCols != 2 {
+		t.Fatalf("expected 2 orders in final state, got count=%d, err=%v", oCols, err)
+	}
+}
+
+func TestExpandContract_BareRenameMapping(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("failed opening sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+
+	initSQL := `CREATE TABLE accounts (id INTEGER PRIMARY KEY, email_address TEXT NOT NULL);`
+	err = grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:   grizzle.DialectSQLite,
+		SchemaSQL: initSQL,
+	})
+	if err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	_, err = db.Exec(`INSERT INTO accounts (id, email_address) VALUES (1, 'user@example.com');`)
+	if err != nil {
+		t.Fatalf("failed inserting row: %v", err)
+	}
+
+	desiredSQL := `CREATE TABLE accounts (id INTEGER PRIMARY KEY, email TEXT NOT NULL);`
+
+	bareRenames := map[string]string{
+		"email_address": "email",
+	}
+
+	// 1. Expand plan
+	plan1, err := grizzle.PlanDiff(ctx, db, grizzle.Options{
+		Dialect:        grizzle.DialectSQLite,
+		SchemaSQL:      desiredSQL,
+		ExpandContract: true,
+		Renames:        bareRenames,
+	})
+	if err != nil {
+		t.Fatalf("PlanDiff failed: %v", err)
+	}
+
+	var hasAddEmail bool
+	for _, s := range plan1.Steps {
+		if s.Type == grizzle.ChangeAddColumn && strings.Contains(s.SQL, "email") {
+			hasAddEmail = true
+		}
+	}
+	if !hasAddEmail {
+		t.Fatalf("expected ADD COLUMN email step with bare rename mapping, got steps: %+v", plan1.Steps)
+	}
+
+	// Apply with backfill
+	err = grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:        grizzle.DialectSQLite,
+		SchemaSQL:      desiredSQL,
+		ExpandContract: true,
+		Renames:        bareRenames,
+		Backfill: func(ctx context.Context, tx *sql.Tx, table, oldCol, newCol string) error {
+			_, err := tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET %s = %s WHERE %s IS NULL", table, newCol, oldCol, newCol))
+			return err
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply expand failed: %v", err)
+	}
+
+	// 2. Contract plan
+	trueVal := true
+	plan2, err := grizzle.PlanDiff(ctx, db, grizzle.Options{
+		Dialect:         grizzle.DialectSQLite,
+		SchemaSQL:       desiredSQL,
+		AllowDropColumn: &trueVal,
+		Renames:         bareRenames,
+	})
+	if err != nil {
+		t.Fatalf("PlanDiff contract failed: %v", err)
+	}
+
+	err = grizzle.Apply(ctx, db, plan2, grizzle.ApplyOpts{
+		ExpectedHash: plan2.Hash(),
+		AcceptHazards: []grizzle.HazardCode{
+			grizzle.HazardDropColumn,
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply contract failed: %v", err)
+	}
+
+	var val string
+	err = db.QueryRow("SELECT email FROM accounts WHERE id = 1").Scan(&val)
+	if err != nil || val != "user@example.com" {
+		t.Fatalf("expected email 'user@example.com', got %q, err: %v", val, err)
+	}
+}
+
+func TestExpandContract_BackfillHookErrorAbortsSync(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("failed opening sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+
+	initSQL := `CREATE TABLE items (id INTEGER PRIMARY KEY, old_code TEXT NOT NULL);`
+	err = grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:   grizzle.DialectSQLite,
+		SchemaSQL: initSQL,
+	})
+	if err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	_, err = db.Exec(`INSERT INTO items (id, old_code) VALUES (1, 'ABC');`)
+	if err != nil {
+		t.Fatalf("failed inserting row: %v", err)
+	}
+
+	desiredSQL := `CREATE TABLE items (id INTEGER PRIMARY KEY, new_code TEXT NOT NULL);`
+
+	expectedErr := errors.New("simulated backfill network failure")
+	err = grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:        grizzle.DialectSQLite,
+		SchemaSQL:      desiredSQL,
+		ExpandContract: true,
+		Renames: map[string]string{
+			"items.old_code": "new_code",
+		},
+		Backfill: func(ctx context.Context, tx *sql.Tx, table, oldCol, newCol string) error {
+			return expectedErr
+		},
+	})
+	if err == nil {
+		t.Fatal("expected Sync to fail when Backfill returns error, but got nil")
+	}
+	if !strings.Contains(err.Error(), "simulated backfill network failure") {
+		t.Fatalf("expected error to wrap backfill failure, got: %v", err)
+	}
+}

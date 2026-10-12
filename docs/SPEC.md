@@ -569,7 +569,7 @@ Ambiguous column renames are blocked with `RENAME_AMBIGUOUS`; map them explicitl
 2. **Backfill**: values are copied in batches outside the DDL lock window via `Options.Backfill` or the CLI `--backfill` / `--backfill-file` hooks (requires `--expand-contract`).
 3. **Contract plan**: a second, separately-approved plan (own deterministic hash) drops the legacy columns once the application no longer reads them; destructive, so it requires `AllowDropColumn` and explicit `AcceptHazards`.
 
-The `RENAME_AMBIGUOUS` hazard description and the interactive summary remediation point to `--rename`. See `examples/expand-contract` for a runnable end-to-end flow.
+The `RENAME_AMBIGUOUS` hazard description and the interactive summary remediation point to `--rename`. See `examples/expand-contract` for a runnable end-to-end flow. The API shapes for `Options.Renames`, `Options.ExpandContract`, and `Options.Backfill`, along with their contribution to `Plan.Hash()`, are frozen and stabilized across the `rc` line.
 
 ### Invariant 8: History and drift detection
 Applied plans are audited in `grizzle_history`. `Check()` provides read-only schema drift verification. A failed success-path history write does not fail the applied migration: it is logged at ERROR and surfaced as a typed non-fatal error (`errors.Is(err, grizzle.ErrHistoryRecord)`); failure-path history write failures are logged and never swallowed.

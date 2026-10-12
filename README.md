@@ -110,11 +110,19 @@ grizzle export --plan plan.json --format goose --out ./migrations
 
 ### PostgreSQL (14–18)
 
-* Tables, columns, enums, domains, custom range types, and composite types.
-* Non-blocking operations: indexes via `CONCURRENTLY`, foreign keys via `NOT VALID` + `VALIDATE CONSTRAINT`.
-* Functions, procedures, triggers, views, materialized views, RLS policies, and extensions.
-* Staged migrations: explicit column renames (`Options.Renames` / `--rename`) and expand/contract (`Options.ExpandContract` / `--expand-contract`, with optional `--backfill`).
-* Optional role/privilege and publication/event-trigger SQL files (`--roles` / `RolesSQL`, `--catalog` / `CatalogSQL`).
+| Object Category | Managed Constructs (Declarative Lifecycle) | Protected-Only / Invariant |
+| :--- | :--- | :--- |
+| **Tables & Columns** | `CREATE`/`DROP TABLE`, `ADD`/`DROP`/`RENAME COLUMN`, type conversions (`USING`), nullability, defaults, generated columns (`STORED`), partitioned tables (declarative attach/detach). | Identity/serial sequences (`deptype = 'i'`) preserved; full validation scans flagged; unmanaged tables outside scope untouched. |
+| **Indexes & Constraints** | `CREATE INDEX CONCURRENTLY`, partial/unique/expression/BRIN/GIN/GiST indexes; Foreign keys (`NOT VALID` + `VALIDATE`), `CHECK` constraints (staged validation, normalized expressions). | Primary key / unique constraint backing indexes are managed via table/constraint definition. |
+| **Data Types** | Enums (`CREATE`/`ADD VALUE`/`RENAME VALUE`), Domains (`CHECK` constraint alteration), Custom Range Types (`CREATE`/`DROP`), Composite Types (`CREATE`/`ALTER ATTRIBUTE`/`DROP`). | System types; extension-provided types (`deptype = 'e'`); dropped enum labels emit `DROP_ENUM_VALUE` critical hazard. |
+| **Sequences** | Standalone `CREATE SEQUENCE` declared in schema SQL, parameters (`INCREMENT`, `MIN/MAXVALUE`, `CACHE`, `CYCLE`), ownership (`OWNED BY table.col` vs `NONE`), `DROP SEQUENCE IF EXISTS`. | Implicit identity/serial sequences (`deptype = 'i'`); external unmanaged sequences are never auto-dropped. |
+| **Routines & Triggers** | Functions & Procedures (`CREATE OR REPLACE`, signature drift drop/recreate), Triggers (per-table trigger defs), User-defined aggregates (`CREATE AGGREGATE`). | Built-in routines; extension-owned functions (`deptype = 'e'`); window functions (`prokind = 'w'`); ordered-set / hypothetical aggregates (`aggkind != 'd'`). |
+| **Views** | Views (`CREATE OR REPLACE` for append-only columns, drop/create for structural alterations), Materialized Views (drop/recreate + refresh). | System catalogs / unmanaged views. |
+| **Security & Access** | Row-Level Security (`ENABLE`/`FORCE`), RLS Policies (in-place `ALTER POLICY` for roles/USING/WITH CHECK, drop/create for command), Roles & Grants (via `RolesSQL` / `SchemaSQL`). | Unmanaged roles; grants to `PUBLIC` or unmanaged roles are never revoked; marker comment `grizzle-managed` required to drop roles. |
+| **Cluster & Replication** | Extensions (`CREATE EXTENSION`), Logical Publications, Subscriptions, Logical Replication Slots, DDL Event Triggers (via `CatalogSQL` / `SchemaSQL`). | Physical replication slots; unmanaged cluster triggers/publications without `grizzle-managed` marker comment. |
+
+> [!NOTE]
+> **API & Hash Stability:** `Options.Renames`, `Options.ExpandContract`, and `Options.Backfill` API shapes and `Plan.Hash()` inputs are frozen across the `rc` line (stable, no longer experimental). Plan hashes remain strictly deterministic across versions. Full catalog queries, hazard taxonomy, and engine details are documented in [docs/SPEC.md](docs/SPEC.md#3-supported-schema-constructs).
 
 ### SQLite (3.35+)
 

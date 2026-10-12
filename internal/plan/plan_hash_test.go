@@ -189,3 +189,107 @@ func TestPlan_Document_PasswordRoundTripHashStable(t *testing.T) {
 		t.Fatalf("reloaded plan hash %q != original %q (Document/Hash redaction mismatch)", got, want)
 	}
 }
+
+// TestPlan_Hash_StagedEvolutionGolden pins golden plan hashes for Renames,
+// staged ExpandContract expand phase, and contract phase plans to guarantee
+// hash inputs remain frozen and immutable across versions.
+func TestPlan_Hash_StagedEvolutionGolden(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		plan *plan.Plan
+		want string
+	}{
+		{
+			name: "bare_rename",
+			plan: &plan.Plan{
+				TargetSchema: "public",
+				Renames:      map[string]string{"old_col": "new_col"},
+				Steps: []plan.Step{
+					{Type: plan.ChangeRenameColumn, Table: "users", OldColumn: "old_col", SQL: `ALTER TABLE "public"."users" RENAME COLUMN "old_col" TO "new_col";`},
+				},
+			},
+			want: "72ebef41177705bb88e1aaa795e717fddc46ae8f7f3a2448b23036868fd7a9b2",
+		},
+		{
+			name: "table_qualified_rename",
+			plan: &plan.Plan{
+				TargetSchema: "public",
+				Renames:      map[string]string{"users.old_col": "new_col"},
+				Steps: []plan.Step{
+					{Type: plan.ChangeRenameColumn, Table: "users", OldColumn: "old_col", SQL: `ALTER TABLE "public"."users" RENAME COLUMN "old_col" TO "new_col";`},
+				},
+			},
+			want: "e2314bdd43fba85ecf05037cb485e07577b8dda2177f37beed25dab6fffe6b41",
+		},
+		{
+			name: "staged_expand_phase",
+			plan: &plan.Plan{
+				TargetSchema:   "public",
+				ExpandContract: true,
+				Renames:        map[string]string{"users.full_name": "display_name"},
+				Steps: []plan.Step{
+					{Type: plan.ChangeAddColumn, Table: "users", SQL: `ALTER TABLE "public"."users" ADD COLUMN "display_name" TEXT;`},
+				},
+			},
+			want: "d4438ca0ff73e84154711f80fa4d1c6404dda8f4cc9a7af102b2fea6111e66f5",
+		},
+		{
+			name: "staged_contract_phase",
+			plan: &plan.Plan{
+				TargetSchema: "public",
+				Policy:       plan.DropPolicy{AllowColumn: true},
+				Renames:      map[string]string{"users.full_name": "display_name"},
+				Steps: []plan.Step{
+					{Type: plan.ChangeDropColumn, Table: "users", OldColumn: "full_name", Destructive: true, SQL: `ALTER TABLE "public"."users" DROP COLUMN "full_name";`},
+				},
+			},
+			want: "c5b8836d6490c949ceadf2d29aa22479a9dfc55f970642e1e61c6b8f2fdd4dea",
+		},
+		{
+			name: "multi_table_expand_renames",
+			plan: &plan.Plan{
+				TargetSchema:   "public",
+				TargetSchemas:  []string{"public"},
+				ExpandContract: true,
+				Renames: map[string]string{
+					"users.first_name": "given_name",
+					"users.last_name":  "family_name",
+					"orders.cost":      "amount",
+				},
+				Steps: []plan.Step{
+					{Type: plan.ChangeAddColumn, Table: "orders", SQL: `ALTER TABLE "public"."orders" ADD COLUMN "amount" INTEGER;`},
+					{Type: plan.ChangeAddColumn, Table: "users", SQL: `ALTER TABLE "public"."users" ADD COLUMN "family_name" TEXT;`},
+					{Type: plan.ChangeAddColumn, Table: "users", SQL: `ALTER TABLE "public"."users" ADD COLUMN "given_name" TEXT;`},
+				},
+			},
+			want: "073ab04579dc2eb5f41e78711f4ab59e9d526502f9d479229705b58de9b0170b",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.plan.Hash()
+			if tc.want != "" && got != tc.want {
+				t.Fatalf("golden hash mismatch for %s:\ngot:  %s\nwant: %s\nIf hash inputs were intentionally modified, review carefully.", tc.name, got, tc.want)
+			}
+
+			// Verify JSON round-trip stability
+			data, err := tc.plan.ToJSON()
+			if err != nil {
+				t.Fatalf("ToJSON failed: %v", err)
+			}
+			parsed, envelopeHash, err := plan.ParsePlanJSON(data)
+			if err != nil {
+				t.Fatalf("ParsePlanJSON failed: %v", err)
+			}
+			if envelopeHash != got {
+				t.Fatalf("envelope hash %q != computed hash %q", envelopeHash, got)
+			}
+			if parsed.Hash() != got {
+				t.Fatalf("parsed plan hash %q != original hash %q", parsed.Hash(), got)
+			}
+		})
+	}
+}

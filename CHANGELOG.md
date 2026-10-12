@@ -148,7 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Constraints auto-named by PostgreSQL (inline `CHECK` syntax) are validated and redefined but never auto-dropped; explicitly named constraints are fully managed.
   - SQLite check constraints remain out of scope (not introspected; not preserved through rebuilds).
 - **Staged Expand-and-Contract Migrations**:
-  - Staged non-destructive migrations enabled via experimental `Options.ExpandContract`.
+  - Staged non-destructive migrations enabled via `Options.ExpandContract` (API shapes and hash inputs frozen).
   - Plan 1 adds new columns as nullable alongside existing columns.
   - Plan 2 (contract phase) is emitted separately with its own deterministic approval hash to drop legacy columns.
   - Added `BackfillFunc` hook (`Options.Backfill` / `ApplyOpts.Backfill`) executed in batches outside the DDL lock window.

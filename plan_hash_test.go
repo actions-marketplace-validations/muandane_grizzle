@@ -370,4 +370,12 @@ func TestPlan_Hash_ExcludesOperationalFields(t *testing.T) {
 			t.Errorf("expected Renames to alter hash, but remained identical")
 		}
 	})
+
+	t.Run("included_ExpandContract", func(t *testing.T) {
+		pWithEC := *basePlan
+		pWithEC.ExpandContract = true
+		if pWithEC.Hash() == baseHash {
+			t.Errorf("expected ExpandContract to alter hash, but remained identical")
+		}
+	})
 }
