@@ -158,7 +158,7 @@ grizzle export --plan plan.json --format goose --out ./migrations
 * [CONTRIBUTING](CONTRIBUTING.md) — devenv, hooks, PR checklist
 * [CHANGELOG](CHANGELOG.md)
 
-Current tag: **v0.1.0-rc2**.
+Current tag: **v0.1.0-rc3**.
 
 ## License
 

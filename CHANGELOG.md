@@ -5,17 +5,50 @@ All notable changes to Grizzle will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.1.0-rc3] - 2026-10-12
+
+### Added
+- **User-Defined Range & Composite Types** (`#37`, `#38`):
+  - Declarative lifecycle for PostgreSQL custom range types (`CREATE TYPE ... AS RANGE`) and composite types (`CREATE TYPE ... AS (...)`).
+  - In-place composite type attribute evolution (`ALTER TYPE ... ADD/DROP/ALTER ATTRIBUTE`).
+  - Phased drop-and-recreate (`ChangeDropRangeRetype`, `ChangeDropCompositeRetype`) sorting at priority 28 before replacement type creation.
+  - Live-only type drops gated behind `AllowDropRangeType`, `AllowDropCompositeType`, or `AllowDropType` + `DROP_RANGE_TYPE` / `DROP_COMPOSITE_TYPE` (CRITICAL) and sorting at priority 101 with `DROP TYPE IF EXISTS`.
+- **Standalone and Owned Sequences** (`#29`):
+  - Declarative sequence management for standalone `CREATE SEQUENCE` declarations in schema SQL.
+  - Diffing and synchronization of sequence parameters (`INCREMENT BY`, `MINVALUE`, `MAXVALUE`, `CACHE`, `CYCLE`) and ownership (`OWNED BY table.col` vs `OWNED BY NONE`).
+  - Automatic exclusion of implicit identity and serial sequences (`deptype = 'i'`).
+  - Sequence drops sort after table drops (`priority 102`) with `DROP SEQUENCE IF EXISTS` to prevent cascade collisions.
+- **In-Place Policy Evolution** (`#33`):
+  - RLS policy drift in roles, `USING`, or `WITH CHECK` expressions now renders non-destructive `ALTER POLICY ... TO ... USING (...) WITH CHECK (...)` without requiring `AllowDropPolicy` or dropping the policy.
+  - Full support for the PostgreSQL `PUBLIC` pseudo-role (`TO public`).
+- **SQL Expression Normalization** (`#30`):
+  - Quote-aware expression normalizer canonicalizes parentheses, strips redundant type casts (including parameterized types like `numeric(10,2)` and array casts), standardizes boolean operators (`IS TRUE` → `= true`), and strips shadow schema references.
+  - Eliminates false-positive diffs on `CHECK` constraints, generated columns, RLS policy expressions, and partial index `WHERE` predicates.
+- **Shadow Error Hints & Diagnostics** (`#31`):
+  - Contextual remediation hints mapped from PostgreSQL error codes and messages during shadow transaction compilation (missing extensions, undefined functions, missing tables, misspelled columns, and duplicate identifiers).
+- **Static Schema Lint Rules** (`#34`, `#32`, `#42`):
+  - `L010` (`TriggerWithoutFunction`): Warns when triggers execute functions missing from desired schema routines.
+  - `L011` (`UnversionedExtension`): Advises version pinning on `CREATE EXTENSION` statements.
+  - `L012` (`NonIdempotentSeed`): Warns on non-idempotent statements in `SeedSQL` (bare `INSERT` without `ON CONFLICT` or `WHERE NOT EXISTS`, unconditional `DELETE`, and `TRUNCATE`). Exports `BuildIdempotentInsert` helper.
+  - `L013` (`UnsupportedSQLiteFeature`): Detects PostgreSQL-only features in SQLite schemas (`COMMENT ON`, `ENABLE ROW LEVEL SECURITY`, `CREATE POLICY`).
+- **Enum Value Renames** (`#39`):
+  - Supports `ALTER TYPE ... RENAME VALUE 'old' TO 'new'` mapped via `Options.Renames`. Removed enum labels emit `DROP_ENUM_VALUE` (CRITICAL).
+- **Supported Postgres Objects Matrix & Stability Docs** (`#35`, `#36`, `#41`):
+  - Added structured Supported Objects Matrix to `README.md` categorizing managed vs protected-only constructs across 8 domains.
+  - Stabilized and frozen API shapes for `Options.Renames`, `Options.ExpandContract`, and `Options.Backfill`.
+  - Comprehensive golden plan hash coverage in `internal/plan/plan_hash_test.go` and integration tests in `expand_contract_test.go`.
+  - Documented zero-downtime partition attach pattern using pre-validated `CHECK` constraints.
+- **Benchmark Suite**:
+  - Expanded `bench_test.go` covering warm-boot synchronization, no-drift diffing, fresh table planning, plan hashing, expression normalization, and Kahn topological DAG sorting.
 
 ### Fixed
-- **Plan Hash Policy & Step Coverage**: `Plan.Hash()` now digests all 21 drop policy gates (including `AllowType`, `AllowRangeType`, `AllowCompositeType`, and `AllowDropSequence`) and step metadata (`IsSignatureChange`, `IsDependencyRebuild`, enum values, range/composite definitions, sequence parameters).
+- **Plan Hash Policy & Step Coverage**: `Plan.Hash()` now digests all 21 drop policy gates and step metadata (`IsSignatureChange`, `IsDependencyRebuild`, enum values, range/composite definitions, sequence parameters).
 - **Drop Policy Inheritance**: `optionsFromPlan` preserves `AllowDropType`; `options.go` derives `AllowRangeType` and `AllowCompositeType` from `AllowType` without blanket `AllowDrop` override defeating explicit restrictions.
 - **Enum Value Rename Qualification**: `GenerateRenameEnumValueSQL` schema-qualifies type identifiers via `quoteQualifiedIdentifier`, ensuring renames target the correct type in multi-schema environments.
 - **Sequence Ownership & MinValue Cleanup**: `GenerateAlterSequenceSQL` correctly handles 3-part names, requires both table and column before emitting ownership clauses (falling back to `OWNED BY NONE`), and suppresses spurious `NO MINVALUE` when minvalue is default 1; sequence dependency inspection restricts joins to `deptype = 'a'`.
-- **Range & Composite Type Ordering**: Introduces `ChangeDropRangeRetype` and `ChangeDropCompositeRetype` at priority 28 (before replacements), while deferring live-only `ChangeDropRangeType` and `ChangeDropCompositeType` to priority 101 (after table drops). `GenerateDropTypeSQL` appends `IF EXISTS` to avoid cascading drop errors.
+- **Function Signature Ordering** (`#40`): Replaced routines emit `DROP FUNCTION` before `CREATE FUNCTION` when identity argument types drift.
 - **Identifier Quoting in Seed Builder**: `BuildIdempotentInsert` quotes conflict targets and update columns to prevent SQL injection and support SQL reserved keywords.
 - **Routine Signature Normalization**: Canonicalizes routine argument types using `NormalizeIdentityArgs` before routine signature comparison.
-- **Type Cast Normalization**: Consumes parameterized casts such as `numeric(10,2)` and array casts cleanly in scanner.
 - **Comment-Aware Lint Rules**: Lint rules for SQLite and extension version pinning strip comments prior to regex matching; seed lint rule supports CTE prefixes (`WITH ... INSERT`).
 
 ## [v0.1.0-rc2] - 2026-10-07
