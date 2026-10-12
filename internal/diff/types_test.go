@@ -79,17 +79,23 @@ func TestDiff_RangeTypes_CreateDropAndSubtypeDrift(t *testing.T) {
 					t.Errorf("expected replacement RangeType with subtype bigint, got %v", c.RangeType)
 				}
 			}
-		case plan.ChangeDropRangeType:
+		case plan.ChangeDropRangeType, plan.ChangeDropRangeRetype:
 			if c.Table == "stale_range" {
 				foundDropStale = true
+				if c.Type != plan.ChangeDropRangeType {
+					t.Errorf("expected ChangeDropRangeType for stale_range, got %v", c.Type)
+				}
 				if !c.Destructive {
 					t.Errorf("ChangeDropRangeType must be destructive")
 				}
 			}
 			if c.Table == "evolving_range" {
 				foundDropEvolving = true
+				if c.Type != plan.ChangeDropRangeRetype {
+					t.Errorf("expected ChangeDropRangeRetype for evolving_range, got %v", c.Type)
+				}
 				if !c.Destructive {
-					t.Errorf("ChangeDropRangeType for evolving subtype must be destructive")
+					t.Errorf("ChangeDropRangeRetype for evolving subtype must be destructive")
 				}
 			}
 		}
@@ -338,18 +344,22 @@ func TestPlan_SortSteps_RangeAndCompositeOrdering(t *testing.T) {
 		{Type: plan.ChangeDropTable, Table: "old_orders", Destructive: true},
 		{Type: plan.ChangeDropCompositeType, Table: "old_address", Destructive: true},
 		{Type: plan.ChangeDropRangeType, Table: "old_range", Destructive: true},
+		{Type: plan.ChangeDropCompositeRetype, Table: "retype_address", Destructive: true},
+		{Type: plan.ChangeDropRangeRetype, Table: "retype_range", Destructive: true},
 	}
 
 	plan.SortSteps(steps)
 
 	// Expected priorities:
-	// ChangeDropCompositeType: 28
-	// ChangeDropRangeType: 28
+	// ChangeDropCompositeRetype: 28
+	// ChangeDropRangeRetype: 28
 	// ChangeCreateCompositeType: 31
 	// ChangeCreateRangeType: 32
 	// ChangeAlterCompositeType: 33
 	// ChangeCreateTable: 40
 	// ChangeDropTable: 100
+	// ChangeDropRangeType: 101
+	// ChangeDropCompositeType: 101
 
 	indices := make(map[plan.ChangeType]int)
 	for i, s := range steps {
@@ -374,11 +384,19 @@ func TestPlan_SortSteps_RangeAndCompositeOrdering(t *testing.T) {
 		}
 	}
 
-	// Check drops happen early (28 < 40)
-	if indices[plan.ChangeDropCompositeType] >= indices[plan.ChangeCreateTable] {
-		t.Errorf("expected ChangeDropCompositeType before ChangeCreateTable")
+	// Check retype drops happen early (28 < 40)
+	if indices[plan.ChangeDropCompositeRetype] >= indices[plan.ChangeCreateTable] {
+		t.Errorf("expected ChangeDropCompositeRetype before ChangeCreateTable")
 	}
-	if indices[plan.ChangeDropRangeType] >= indices[plan.ChangeCreateTable] {
-		t.Errorf("expected ChangeDropRangeType before ChangeCreateTable")
+	if indices[plan.ChangeDropRangeRetype] >= indices[plan.ChangeCreateTable] {
+		t.Errorf("expected ChangeDropRangeRetype before ChangeCreateTable")
+	}
+
+	// Check live-only drops happen after drop table (101 > 100)
+	if indices[plan.ChangeDropCompositeType] <= indices[plan.ChangeDropTable] {
+		t.Errorf("expected ChangeDropCompositeType after ChangeDropTable")
+	}
+	if indices[plan.ChangeDropRangeType] <= indices[plan.ChangeDropTable] {
+		t.Errorf("expected ChangeDropRangeType after ChangeDropTable")
 	}
 }

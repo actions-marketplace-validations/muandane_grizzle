@@ -193,13 +193,13 @@ func TestGenerateAlterCompositeTypeSQL(t *testing.T) {
 
 func TestGenerateDropTypeSQL(t *testing.T) {
 	got := postgres.GenerateDropTypeSQL("public", "old_type")
-	want := `DROP TYPE "public"."old_type";`
+	want := `DROP TYPE IF EXISTS "public"."old_type";`
 	if got != want {
 		t.Fatalf("GenerateDropTypeSQL() = %q, want %q", got, want)
 	}
 
 	gotQualified := postgres.GenerateDropTypeSQL("public", `"custom"."old_type"`)
-	wantQualified := `DROP TYPE "custom"."old_type";`
+	wantQualified := `DROP TYPE IF EXISTS "custom"."old_type";`
 	if gotQualified != wantQualified {
 		t.Fatalf("GenerateDropTypeSQL() qualified = %q, want %q", gotQualified, wantQualified)
 	}
@@ -239,7 +239,7 @@ func TestRenderChangeWithOpts_RangeAndCompositeTypes(t *testing.T) {
 		if step.Type != plan.ChangeDropRangeType {
 			t.Errorf("step.Type = %v, want %v", step.Type, plan.ChangeDropRangeType)
 		}
-		if step.SQL != `DROP TYPE "public"."int_range";` {
+		if step.SQL != `DROP TYPE IF EXISTS "public"."int_range";` {
 			t.Errorf("unexpected step.SQL: %q", step.SQL)
 		}
 	})
@@ -300,7 +300,7 @@ func TestRenderChangeWithOpts_RangeAndCompositeTypes(t *testing.T) {
 		if step.Type != plan.ChangeDropCompositeType {
 			t.Errorf("step.Type = %v, want %v", step.Type, plan.ChangeDropCompositeType)
 		}
-		if step.SQL != `DROP TYPE "public"."coord";` {
+		if step.SQL != `DROP TYPE IF EXISTS "public"."coord";` {
 			t.Errorf("unexpected step.SQL: %q", step.SQL)
 		}
 	})

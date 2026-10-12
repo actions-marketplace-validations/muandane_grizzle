@@ -143,9 +143,11 @@ const (
 	ChangeRefreshMatView      = plan.ChangeRefreshMatView
 	ChangeCreateRangeType     = plan.ChangeCreateRangeType
 	ChangeDropRangeType       = plan.ChangeDropRangeType
+	ChangeDropRangeRetype     = plan.ChangeDropRangeRetype
 	ChangeCreateCompositeType = plan.ChangeCreateCompositeType
 	ChangeAlterCompositeType  = plan.ChangeAlterCompositeType
 	ChangeDropCompositeType   = plan.ChangeDropCompositeType
+	ChangeDropCompositeRetype = plan.ChangeDropCompositeRetype
 	ChangeCreateSequence      = plan.ChangeCreateSequence
 	ChangeAlterSequence       = plan.ChangeAlterSequence
 	ChangeDropSequence        = plan.ChangeDropSequence
@@ -600,6 +602,7 @@ func optionsFromPlan(p *Plan, opts ApplyOpts) Options {
 		AllowDropTrigger:         &p.Policy.AllowTrigger,
 		AllowDropView:            &p.Policy.AllowView,
 		AllowDropDomain:          &p.Policy.AllowDomain,
+		AllowDropType:            &p.Policy.AllowType,
 		AllowDropRangeType:       &p.Policy.AllowRangeType,
 		AllowDropCompositeType:   &p.Policy.AllowCompositeType,
 		AllowDropSequence:        &p.Policy.AllowDropSequence,
@@ -712,8 +715,8 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 		// function/view names); skip table scope checks for them.
 		switch s.Type {
 		case plan.ChangeCreateEnum, plan.ChangeAlterEnum, plan.ChangeRenameEnumValue, plan.ChangeDropEnumValue,
-			plan.ChangeCreateRangeType, plan.ChangeDropRangeType,
-			plan.ChangeCreateCompositeType, plan.ChangeAlterCompositeType, plan.ChangeDropCompositeType,
+			plan.ChangeCreateRangeType, plan.ChangeDropRangeType, plan.ChangeDropRangeRetype,
+			plan.ChangeCreateCompositeType, plan.ChangeAlterCompositeType, plan.ChangeDropCompositeType, plan.ChangeDropCompositeRetype,
 			plan.ChangeCreateSequence, plan.ChangeAlterSequence, plan.ChangeDropSequence,
 			plan.ChangeCreateExtension, plan.ChangeDropExtension,
 			plan.ChangeCreateFunction, plan.ChangeDropFunction,
@@ -978,19 +981,27 @@ func BuildIdempotentInsert(table string, columns []string, conflictTarget string
 	if conflictTarget == "" {
 		b.WriteString(" ON CONFLICT DO NOTHING;")
 	} else if len(updateColumns) == 0 {
-		fmt.Fprintf(&b, " ON CONFLICT (%s) DO NOTHING;", conflictTarget)
+		fmt.Fprintf(&b, " ON CONFLICT (%s) DO NOTHING;", quoteConflictTarget(conflictTarget))
 	} else {
-		fmt.Fprintf(&b, " ON CONFLICT (%s) DO UPDATE SET ", conflictTarget)
+		fmt.Fprintf(&b, " ON CONFLICT (%s) DO UPDATE SET ", quoteConflictTarget(conflictTarget))
 		for i, col := range updateColumns {
 			if i > 0 {
 				b.WriteString(", ")
 			}
-			fmt.Fprintf(&b, "%s = EXCLUDED.%s", col, col)
+			fmt.Fprintf(&b, "%s = EXCLUDED.%s", quoteIdent(col), quoteIdent(col))
 		}
 		b.WriteString(";")
 	}
 
 	return b.String()
+}
+
+func quoteConflictTarget(target string) string {
+	parts := strings.Split(target, ",")
+	for i, p := range parts {
+		parts[i] = quoteIdent(p)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func quoteIdent(s string) string {

@@ -44,7 +44,7 @@ func (UnversionedExtension) Check(s *schema.Schema) []Diagnostic {
 	// 1. Inspect SourceSQL if present.
 	if s.SourceSQL != "" {
 		for _, rawStmt := range schema.SplitStatements(s.SourceSQL) {
-			stmt := schema.StripLeadingSQLComments(rawStmt)
+			stmt := schema.StripComments(rawStmt)
 			m := createExtensionStmtRe.FindStringSubmatch(stmt)
 			if m == nil {
 				continue

@@ -1056,7 +1056,7 @@ func Inspect(ctx context.Context, dbtx dialect.DBTX, schemaName string) (*schema
 		LEFT JOIN pg_depend d ON d.objid = c.oid 
 		    AND d.classid = 'pg_class'::regclass 
 		    AND d.refclassid = 'pg_class'::regclass 
-		    AND d.deptype IN ('a', 'n')
+		    AND d.deptype = 'a'
 		LEFT JOIN pg_class t ON t.oid = d.refobjid
 		LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid
 		WHERE n.nspname = $1
@@ -1126,7 +1126,7 @@ func Inspect(ctx context.Context, dbtx dialect.DBTX, schemaName string) (*schema
 		}
 	}
 	if err := seqRows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("iterating sequence rows in schema %q: %w", schemaName, err)
 	}
 	_ = seqRows.Close()
 

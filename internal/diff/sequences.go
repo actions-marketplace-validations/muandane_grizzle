@@ -74,10 +74,12 @@ func normalizeSequence(seq *schema.Sequence) *schema.Sequence {
 		}
 	}
 	if norm.MinValue == nil {
-		norm.MinValue = &defaultMin
+		minVal := defaultMin
+		norm.MinValue = &minVal
 	}
 	if norm.MaxValue == nil {
-		norm.MaxValue = &defaultMax
+		maxVal := defaultMax
+		norm.MaxValue = &maxVal
 	}
 	return &norm
 }
@@ -195,8 +197,8 @@ func diffSequences(live, desired *schema.Schema, targetSchema string, _ scope.Fi
 				Type:        plan.ChangeAlterSequence,
 				Schema:      targetSchema,
 				Table:       name,
-				Sequence:    dSeq,
-				OldSequence: lSeq,
+				Sequence:    normD,
+				OldSequence: normL,
 				Destructive: false,
 			})
 		}

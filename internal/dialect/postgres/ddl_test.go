@@ -117,7 +117,7 @@ func TestRenderChange_RenameEnumValue(t *testing.T) {
 	}
 
 	step := postgres.RenderChange("public", c)
-	expectedSQL := `ALTER TYPE "status" RENAME VALUE 'pending' TO 'in_progress';`
+	expectedSQL := `ALTER TYPE "public"."status" RENAME VALUE 'pending' TO 'in_progress';`
 	if step.SQL != expectedSQL {
 		t.Errorf("step.SQL = %q, want %q", step.SQL, expectedSQL)
 	}

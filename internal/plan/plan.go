@@ -68,9 +68,11 @@ const (
 	ChangeDropDomainRetype     ChangeType = "DROP_DOMAIN_RETYPE"
 	ChangeCreateRangeType      ChangeType = "CREATE_RANGE_TYPE"
 	ChangeDropRangeType        ChangeType = "DROP_RANGE_TYPE"
+	ChangeDropRangeRetype      ChangeType = "DROP_RANGE_RETYPE"
 	ChangeCreateCompositeType  ChangeType = "CREATE_COMPOSITE_TYPE"
 	ChangeAlterCompositeType   ChangeType = "ALTER_COMPOSITE_TYPE"
 	ChangeDropCompositeType    ChangeType = "DROP_COMPOSITE_TYPE"
+	ChangeDropCompositeRetype  ChangeType = "DROP_COMPOSITE_RETYPE"
 	ChangeCreateSequence       ChangeType = "CREATE_SEQUENCE"
 	ChangeAlterSequence        ChangeType = "ALTER_SEQUENCE"
 	ChangeDropSequence         ChangeType = "DROP_SEQUENCE"
@@ -185,7 +187,7 @@ type DropPolicy struct {
 	AllowTrigger       bool `json:"allow_trigger"`
 	AllowView          bool `json:"allow_view"`
 	AllowDomain        bool `json:"allow_domain"`
-	AllowType          bool `json:"allow_type,omitempty"`
+	AllowType          bool `json:"allow_type"`
 	AllowRangeType     bool `json:"allow_range_type"`
 	AllowCompositeType bool `json:"allow_composite_type"`
 	AllowDropSequence  bool `json:"allow_drop_sequence"`
@@ -238,9 +240,9 @@ func (p DropPolicy) IsAllowed(s Step) bool {
 		// Dropping a domain (or a domain constraint) removes validation and
 		// can strand columns typed by the domain; a single gate covers all.
 		return p.AllowDomain
-	case ChangeDropRangeType:
+	case ChangeDropRangeType, ChangeDropRangeRetype:
 		return p.AllowType || p.AllowRangeType
-	case ChangeDropCompositeType:
+	case ChangeDropCompositeType, ChangeDropCompositeRetype:
 		return p.AllowType || p.AllowCompositeType
 	case ChangeAlterCompositeType:
 		if s.Destructive {
@@ -342,11 +344,13 @@ func (p *Plan) Hash() string {
 	if p.ExpandContract {
 		write("expand_contract:true\n")
 	}
-	write("policy:%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t\n",
+	write("policy:%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t,%t\n",
 		p.Policy.AllowTable, p.Policy.AllowColumn, p.Policy.AllowIndex,
 		p.Policy.AllowFK, p.Policy.AllowCheck,
 		p.Policy.AllowExtension, p.Policy.AllowFunction, p.Policy.AllowPolicy,
 		p.Policy.AllowTrigger, p.Policy.AllowView, p.Policy.AllowDomain,
+		p.Policy.AllowType, p.Policy.AllowRangeType, p.Policy.AllowCompositeType,
+		p.Policy.AllowDropSequence,
 		p.Policy.AllowRevoke, p.Policy.AllowDropRole,
 		p.Policy.AllowDropPublication, p.Policy.AllowDropEventTrigger,
 		p.Policy.AllowDropSubscription, p.Policy.AllowDropReplicationSlot)
@@ -386,10 +390,38 @@ func (p *Plan) Hash() string {
 		if s.IsPendingDetach {
 			pendingStr = "|pending_detach:true"
 		}
-		write("step:%d|type:%s|table:%s|sql:%s|destructive:%t|non_tx:%t|not_null:%t|default:%t|narrowed:%t|rebuild:%t|rename_cand:%t|gen_rewrite:%t|old_col:%s%s%s%s%s\n",
+		stepMeta := ""
+		if s.IsSignatureChange {
+			stepMeta += "|sig_change:true"
+		}
+		if s.IsDependencyRebuild {
+			stepMeta += "|dep_rebuild:true"
+		}
+		if s.OldEnumValue != "" {
+			stepMeta += "|old_enum:" + s.OldEnumValue
+		}
+		if s.EnumValue != "" {
+			stepMeta += "|enum:" + s.EnumValue
+		}
+		if s.RangeType != nil {
+			stepMeta += "|range_type:true"
+		}
+		if s.CompositeType != nil {
+			stepMeta += "|composite_type:true"
+		}
+		if s.CompositeAttr != "" {
+			stepMeta += "|comp_attr:" + s.CompositeAttr
+		}
+		if s.Sequence != nil {
+			stepMeta += "|seq:true"
+		}
+		if s.OldSequence != nil {
+			stepMeta += "|old_seq:true"
+		}
+		write("step:%d|type:%s|table:%s|sql:%s|destructive:%t|non_tx:%t|not_null:%t|default:%t|narrowed:%t|rebuild:%t|rename_cand:%t|gen_rewrite:%t|old_col:%s%s%s%s%s%s\n",
 			i, s.Type, s.Table, strings.TrimSpace(s.SQL), s.Destructive, s.NonTx,
 			s.ColumnNotNull, s.ColumnHasDefault, s.TypeNarrowed, s.IsTableRebuild,
-			s.IsRenameCandidate, s.IsGeneratedRewrite, s.OldColumn, unmStr, partStr, schemaStr, pendingStr,
+			s.IsRenameCandidate, s.IsGeneratedRewrite, s.OldColumn, unmStr, partStr, schemaStr, pendingStr, stepMeta,
 		)
 	}
 
@@ -867,7 +899,7 @@ func stepHazards(s Step) []Hazard {
 			Description: fmt.Sprintf("CHECK constraint on domain %q will be dropped; existing values will no longer be validated", s.Table),
 			SQL:         s.SQL,
 		})
-	case ChangeDropRangeType:
+	case ChangeDropRangeType, ChangeDropRangeRetype:
 		hazards = append(hazards, Hazard{
 			Code:        HazardDropRangeType,
 			Level:       HazardLevelCritical,
@@ -876,7 +908,7 @@ func stepHazards(s Step) []Hazard {
 			Description: fmt.Sprintf("Range type %q will be dropped; dependent tables and columns may be affected", s.Table),
 			SQL:         s.SQL,
 		})
-	case ChangeDropCompositeType:
+	case ChangeDropCompositeType, ChangeDropCompositeRetype:
 		hazards = append(hazards, Hazard{
 			Code:        HazardDropCompositeType,
 			Level:       HazardLevelCritical,
@@ -885,6 +917,17 @@ func stepHazards(s Step) []Hazard {
 			Description: fmt.Sprintf("Composite type %q will be dropped; dependent tables and columns may be affected", s.Table),
 			SQL:         s.SQL,
 		})
+	case ChangeAlterCompositeType:
+		if s.Destructive {
+			hazards = append(hazards, Hazard{
+				Code:        HazardDropCompositeType,
+				Level:       HazardLevelCritical,
+				Type:        s.Type,
+				Table:       s.Table,
+				Description: fmt.Sprintf("Composite type %q attribute %q will be altered or dropped destructively; dependent tables and columns may be affected", s.Table, s.CompositeAttr),
+				SQL:         s.SQL,
+			})
+		}
 	case ChangeDropSequence:
 		hazards = append(hazards, Hazard{
 			Code:        HazardDropSequence,

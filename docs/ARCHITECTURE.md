@@ -108,6 +108,7 @@ sequenceDiagram
 ### 4.3 Catalog inspector & diff engine
 * **Mechanism**: Inspects relational catalogs (`pg_catalog` or `sqlite_schema`) post-lock.
 * **Pure AST Diffing**: Compares tables, columns, constraints, enums, and indexes. Sorts all outputs stably.
+* **Phase-First DAG Topological Ordering**: Orders steps phase-first by ChangeType priority (early drops, creations, alterations, constraint validations, late drops), with Kahn topological sorting within table phases and Warshall transitive closure for foreign keys and partition trees. Retype drops run early (priority 28) before replacements are created, while live-only object drops run after dependent tables are gone (priority 101+).
 * **Expand/Contract Detection**: Unmapped dropped and added columns with matching types trigger `HazardRenameAmbiguous`. Explicit mappings in `Options.Renames` generate atomic `RENAME COLUMN` or staged non-destructive column additions when `ExpandContract: true`.
 
 ### 4.4 Hazard analyzer & gatekeeper

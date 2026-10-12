@@ -55,7 +55,7 @@ func TestPlan_Hash_Golden(t *testing.T) {
 		Renames:       map[string]string{"users_accounts": "users"},
 	}
 
-	const want = "5535ef580cf9685c596b1ec84856498d732d77974a5e056e296f752849e0b825"
+	const want = "2c002423bea23abb1fac6ca7eeadcbffc1f9117b5223c95a5b9166e043c9718a"
 	if got := p.Hash(); got != want {
 		t.Errorf("golden hash mismatch:\n got  %s\n want %s\nIf this change is intentional (hash format edit), update the golden value.", got, want)
 	}
@@ -85,6 +85,10 @@ func TestPlan_Hash_ApprovalSensitiveFields(t *testing.T) {
 		mutate func(p *plan.Plan)
 	}{
 		{"policy", func(p *plan.Plan) { p.Policy.AllowTable = true }},
+		{"policy_allow_type", func(p *plan.Plan) { p.Policy.AllowType = true }},
+		{"policy_allow_range_type", func(p *plan.Plan) { p.Policy.AllowRangeType = true }},
+		{"policy_allow_composite_type", func(p *plan.Plan) { p.Policy.AllowCompositeType = true }},
+		{"policy_allow_drop_sequence", func(p *plan.Plan) { p.Policy.AllowDropSequence = true }},
 		{"target_schema_without_target_schemas", func(p *plan.Plan) {
 			p.TargetSchemas = nil
 			p.TargetSchema = "billing"
@@ -210,7 +214,7 @@ func TestPlan_Hash_StagedEvolutionGolden(t *testing.T) {
 					{Type: plan.ChangeRenameColumn, Table: "users", OldColumn: "old_col", SQL: `ALTER TABLE "public"."users" RENAME COLUMN "old_col" TO "new_col";`},
 				},
 			},
-			want: "72ebef41177705bb88e1aaa795e717fddc46ae8f7f3a2448b23036868fd7a9b2",
+			want: "18185de82b5a511a8f18989bb6004d4d2ab1d8cc87c062719bfeec407dd9b013",
 		},
 		{
 			name: "table_qualified_rename",
@@ -221,7 +225,7 @@ func TestPlan_Hash_StagedEvolutionGolden(t *testing.T) {
 					{Type: plan.ChangeRenameColumn, Table: "users", OldColumn: "old_col", SQL: `ALTER TABLE "public"."users" RENAME COLUMN "old_col" TO "new_col";`},
 				},
 			},
-			want: "e2314bdd43fba85ecf05037cb485e07577b8dda2177f37beed25dab6fffe6b41",
+			want: "caec2a0429dc63f265c890ac11e05818a755aa581030c227bf02974514f03e61",
 		},
 		{
 			name: "staged_expand_phase",
@@ -233,7 +237,7 @@ func TestPlan_Hash_StagedEvolutionGolden(t *testing.T) {
 					{Type: plan.ChangeAddColumn, Table: "users", SQL: `ALTER TABLE "public"."users" ADD COLUMN "display_name" TEXT;`},
 				},
 			},
-			want: "d4438ca0ff73e84154711f80fa4d1c6404dda8f4cc9a7af102b2fea6111e66f5",
+			want: "43103faef13ab0b4d9dd3e9e815ac7e75631d1722228aac5543014addd505396",
 		},
 		{
 			name: "staged_contract_phase",
@@ -245,7 +249,7 @@ func TestPlan_Hash_StagedEvolutionGolden(t *testing.T) {
 					{Type: plan.ChangeDropColumn, Table: "users", OldColumn: "full_name", Destructive: true, SQL: `ALTER TABLE "public"."users" DROP COLUMN "full_name";`},
 				},
 			},
-			want: "c5b8836d6490c949ceadf2d29aa22479a9dfc55f970642e1e61c6b8f2fdd4dea",
+			want: "f43030e7e16490d3ab8fe5f63a3e12f5d089ec253f984394a2b9504a332b9201",
 		},
 		{
 			name: "multi_table_expand_renames",
@@ -264,7 +268,7 @@ func TestPlan_Hash_StagedEvolutionGolden(t *testing.T) {
 					{Type: plan.ChangeAddColumn, Table: "users", SQL: `ALTER TABLE "public"."users" ADD COLUMN "given_name" TEXT;`},
 				},
 			},
-			want: "073ab04579dc2eb5f41e78711f4ab59e9d526502f9d479229705b58de9b0170b",
+			want: "618ee399af66c39c09fc119183c747a5fe8e8be6aa5dbf7a3011b1814ff33956",
 		},
 	}
 

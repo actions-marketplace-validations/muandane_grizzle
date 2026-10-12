@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Plan Hash Policy & Step Coverage**: `Plan.Hash()` now digests all 21 drop policy gates (including `AllowType`, `AllowRangeType`, `AllowCompositeType`, and `AllowDropSequence`) and step metadata (`IsSignatureChange`, `IsDependencyRebuild`, enum values, range/composite definitions, sequence parameters).
+- **Drop Policy Inheritance**: `optionsFromPlan` preserves `AllowDropType`; `options.go` derives `AllowRangeType` and `AllowCompositeType` from `AllowType` without blanket `AllowDrop` override defeating explicit restrictions.
+- **Enum Value Rename Qualification**: `GenerateRenameEnumValueSQL` schema-qualifies type identifiers via `quoteQualifiedIdentifier`, ensuring renames target the correct type in multi-schema environments.
+- **Sequence Ownership & MinValue Cleanup**: `GenerateAlterSequenceSQL` correctly handles 3-part names, requires both table and column before emitting ownership clauses (falling back to `OWNED BY NONE`), and suppresses spurious `NO MINVALUE` when minvalue is default 1; sequence dependency inspection restricts joins to `deptype = 'a'`.
+- **Range & Composite Type Ordering**: Introduces `ChangeDropRangeRetype` and `ChangeDropCompositeRetype` at priority 28 (before replacements), while deferring live-only `ChangeDropRangeType` and `ChangeDropCompositeType` to priority 101 (after table drops). `GenerateDropTypeSQL` appends `IF EXISTS` to avoid cascading drop errors.
+- **Identifier Quoting in Seed Builder**: `BuildIdempotentInsert` quotes conflict targets and update columns to prevent SQL injection and support SQL reserved keywords.
+- **Routine Signature Normalization**: Canonicalizes routine argument types using `NormalizeIdentityArgs` before routine signature comparison.
+- **Type Cast Normalization**: Consumes parameterized casts such as `numeric(10,2)` and array casts cleanly in scanner.
+- **Comment-Aware Lint Rules**: Lint rules for SQLite and extension version pinning strip comments prior to regex matching; seed lint rule supports CTE prefixes (`WITH ... INSERT`).
+
 ## [v0.1.0-rc2] - 2026-10-07
 
 ### Breaking

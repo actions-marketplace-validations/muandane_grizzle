@@ -21,10 +21,10 @@ var (
 	numParenRegex  = regexp.MustCompile(`^\(?(-?\d+(?:\.\d+)?)(?:::[\w\."\s]+)?\)?$`)
 
 	// Redundant cast on parenthesized/simple numbers: (0)::numeric or 0::numeric or (-1)::integer
-	numCastParenRegex = regexp.MustCompile(`\(?(-?\d+(?:\.\d+)?)\)?::(?:numeric|decimal|integer|int[248]?|bigint|smallint|float[48]?|double\s+precision)`)
+	numCastParenRegex = regexp.MustCompile(`\(?(-?\d+(?:\.\d+)?)\)?::(?:numeric|decimal|integer|int[248]?|bigint|smallint|float[48]?|double\s+precision)(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?(?:\[\])?`)
 
 	// Redundant cast on identifiers in parens: (email)::text or (col)::character varying
-	colCastParenRegex = regexp.MustCompile(`\(([a-zA-Z_][a-zA-Z0-9_]*)\)::(?:text|varchar|character\s+varying|char)`)
+	colCastParenRegex = regexp.MustCompile(`\(([a-zA-Z_][a-zA-Z0-9_]*)\)::(?:text|varchar|character\s+varying|char)(?:\s*\(\s*\d+\s*\))?(?:\[\])?`)
 
 	// Boolean syntax variations: IS TRUE -> = true, IS FALSE -> = false
 	isTrueRegex     = regexp.MustCompile(`(?i)\bIS\s+TRUE\b`)
@@ -137,16 +137,7 @@ func NormalizeExpression(expr string, mappings map[string]string, currentSchema 
 		curr = currentSchema[0]
 	}
 
-	// 1. Unmap shadow schemas
-	for shadow, target := range mappings {
-		if shadow == "" || target == "" {
-			continue
-		}
-		s = strings.ReplaceAll(s, shadow+".", target+".")
-		s = strings.ReplaceAll(s, `"`+shadow+`".`, `"`+target+`".`)
-	}
-
-	// 2. Strip current schema prefix on routines / types
+	// Strip current and mapped schemas outside string literals
 	stripSchemas := make([]string, 0, len(mappings)*2+2)
 	if curr != "" {
 		stripSchemas = append(stripSchemas, curr)
@@ -159,22 +150,11 @@ func NormalizeExpression(expr string, mappings map[string]string, currentSchema 
 			stripSchemas = append(stripSchemas, shadow)
 		}
 	}
-	for _, sc := range stripSchemas {
-		if sc == "" {
-			continue
-		}
-		s = strings.ReplaceAll(s, "::"+sc+".", "::")
-		s = strings.ReplaceAll(s, "::\""+sc+"\".", "::")
-		s = strings.ReplaceAll(s, "("+sc+".", "(")
-		s = strings.ReplaceAll(s, "(\""+sc+"\".", "(")
-		s = strings.ReplaceAll(s, ","+sc+".", ",")
-		s = strings.ReplaceAll(s, ",\""+sc+"\".", ",")
-	}
 
-	// 3. Strip outer parens
+	// 1. Strip outer parens
 	s = StripOuterParens(s)
 
-	// 4. Tokenize by string literals so transformations only apply outside quotes
+	// 2. Tokenize by string literals so transformations only apply outside quotes
 	var b strings.Builder
 	inSingle, inDouble, escaped := false, false, false
 	start := 0
@@ -185,6 +165,36 @@ func NormalizeExpression(expr string, mappings map[string]string, currentSchema 
 		}
 		leadingSpace := unicode.IsSpace(rune(text[0]))
 		trailingSpace := unicode.IsSpace(rune(text[len(text)-1]))
+
+		// Unmap shadow schemas outside string literals
+		for shadow, target := range mappings {
+			if shadow == "" || target == "" {
+				continue
+			}
+			text = strings.ReplaceAll(text, shadow+".", target+".")
+			text = strings.ReplaceAll(text, `"`+shadow+`".`, `"`+target+`".`)
+		}
+
+		// Strip current schema prefix on routines / types outside string literals
+		for _, sc := range stripSchemas {
+			if sc == "" {
+				continue
+			}
+			text = strings.ReplaceAll(text, "::"+sc+".", "::")
+			text = strings.ReplaceAll(text, "::\""+sc+"\".", "::")
+			text = strings.ReplaceAll(text, "("+sc+".", "(")
+			text = strings.ReplaceAll(text, "(\""+sc+"\".", "(")
+			text = strings.ReplaceAll(text, ","+sc+".", ",")
+			text = strings.ReplaceAll(text, ",\""+sc+"\".", ",")
+			text = strings.ReplaceAll(text, " "+sc+".", " ")
+			text = strings.ReplaceAll(text, " \""+sc+"\".", " ")
+			if after, ok := strings.CutPrefix(text, sc+"."); ok {
+				text = after
+			}
+			if after, ok := strings.CutPrefix(text, `"`+sc+`".`); ok {
+				text = after
+			}
+		}
 
 		t := isTrueRegex.ReplaceAllString(text, "= true")
 		t = isFalseRegex.ReplaceAllString(t, "= false")
@@ -242,13 +252,14 @@ func NormalizeExpression(expr string, mappings map[string]string, currentSchema 
 						(after[idx] >= 'a' && after[idx] <= 'z') ||
 						(after[idx] >= 'A' && after[idx] <= 'Z') ||
 						(after[idx] >= '0' && after[idx] <= '9') ||
-						after[idx] == ' ' || after[idx] == '[' || after[idx] == ']') {
+						after[idx] == ' ' || after[idx] == '[' || after[idx] == ']' ||
+						after[idx] == '(' || after[idx] == ')' || after[idx] == ',') {
 						idx++
 					}
 					castType := strings.TrimSpace(after[:idx])
 					castLower := strings.ToLower(castType)
-					if castLower == "text" || castLower == "character varying" || strings.HasPrefix(castLower, "varchar") || castLower == "char" {
-						start += len("::") + len(castType)
+					if castLower == "text" || castLower == "character varying" || strings.HasPrefix(castLower, "varchar") || strings.HasPrefix(castLower, "char") {
+						start += len("::") + len(after[:idx])
 					}
 				}
 				b.WriteString(quoted)
@@ -608,4 +619,29 @@ func IsTypeNarrowing(oldType, newType string) bool {
 
 	// Default fallback: any other non-identical type transition carries risk/narrowing
 	return true
+}
+
+// NormalizeIdentityArgs standardizes a routine identity arguments string (e.g. "a int, b text").
+func NormalizeIdentityArgs(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parts := strings.Split(raw, ",")
+	normParts := make([]string, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		words := strings.Fields(part)
+		if len(words) == 0 {
+			normParts[i] = ""
+			continue
+		}
+		if len(words) == 1 {
+			normParts[i] = NormalizeType(words[0])
+		} else {
+			typeName := strings.Join(words[1:], " ")
+			normParts[i] = words[0] + " " + NormalizeType(typeName)
+		}
+	}
+	return strings.Join(normParts, ", ")
 }

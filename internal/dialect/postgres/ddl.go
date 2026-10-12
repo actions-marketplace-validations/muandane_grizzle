@@ -530,7 +530,12 @@ func GenerateAlterCompositeTypeSQL(targetSchema, typeName string, attr *schema.C
 
 // GenerateDropTypeSQL constructs a DROP TYPE statement.
 func GenerateDropTypeSQL(targetSchema, typeName string) string {
-	return fmt.Sprintf("DROP TYPE %s;", qualifyType(targetSchema, typeName))
+	return fmt.Sprintf("DROP TYPE IF EXISTS %s;", qualifyType(targetSchema, typeName))
+}
+
+// GenerateRenameEnumValueSQL constructs an ALTER TYPE ... RENAME VALUE statement.
+func GenerateRenameEnumValueSQL(targetSchema, enumName, oldVal, newVal string) string {
+	return fmt.Sprintf("ALTER TYPE %s RENAME VALUE %s TO %s;", qualifyType(targetSchema, enumName), quoteStringLiteral(oldVal), quoteStringLiteral(newVal))
 }
 
 func qualifySequence(targetSchema, seqName string) string {
@@ -594,22 +599,25 @@ func GenerateAlterSequenceSQL(targetSchema, seqName string, oldSeq, newSeq *sche
 
 	// Ownership change:
 	if oldSeq == nil || oldSeq.OwnedByTable != newSeq.OwnedByTable || oldSeq.OwnedByColumn != newSeq.OwnedByColumn {
-		if newSeq.OwnedByTable == "" || strings.EqualFold(newSeq.OwnedByTable, "NONE") {
+		if newSeq.OwnedByTable == "" || strings.EqualFold(newSeq.OwnedByTable, "NONE") || newSeq.OwnedByColumn == "" {
 			parts = append(parts, "OWNED BY NONE")
 		} else {
 			sch := targetSchema
 			tbl := newSeq.OwnedByTable
 			if strings.Contains(tbl, ".") {
 				split := strings.Split(tbl, ".")
-				sch = split[0]
-				tbl = split[1]
+				if len(split) >= 2 {
+					sch = split[len(split)-2]
+					tbl = split[len(split)-1]
+				}
 			} else if newSeq.Schema != "" {
 				sch = newSeq.Schema
 			}
+			col := strings.Trim(newSeq.OwnedByColumn, `"`)
 			if sch != "" {
-				parts = append(parts, fmt.Sprintf("OWNED BY %q.%q.%q", strings.Trim(sch, `"`), strings.Trim(tbl, `"`), strings.Trim(newSeq.OwnedByColumn, `"`)))
+				parts = append(parts, fmt.Sprintf("OWNED BY %q.%q.%q", strings.Trim(sch, `"`), strings.Trim(tbl, `"`), col))
 			} else {
-				parts = append(parts, fmt.Sprintf("OWNED BY %q.%q", strings.Trim(tbl, `"`), strings.Trim(newSeq.OwnedByColumn, `"`)))
+				parts = append(parts, fmt.Sprintf("OWNED BY %q.%q", strings.Trim(tbl, `"`), col))
 			}
 		}
 	}
@@ -619,7 +627,7 @@ func GenerateAlterSequenceSQL(targetSchema, seqName string, oldSeq, newSeq *sche
 		if newSeq.Increment != 0 && newSeq.Increment != oldSeq.Increment {
 			parts = append(parts, fmt.Sprintf("INCREMENT BY %d", newSeq.Increment))
 		}
-		if newSeq.MinValue == nil && oldSeq.MinValue != nil {
+		if newSeq.MinValue == nil && oldSeq.MinValue != nil && *oldSeq.MinValue != 1 {
 			parts = append(parts, "NO MINVALUE")
 		} else if newSeq.MinValue != nil && (oldSeq.MinValue == nil || *newSeq.MinValue != *oldSeq.MinValue) {
 			parts = append(parts, fmt.Sprintf("MINVALUE %d", *newSeq.MinValue))
@@ -921,20 +929,21 @@ func RenderChangeWithOpts(targetSchema string, c diff.Change, opts RenderOpts) p
 		step.SQL = GenerateAddEnumValueSQL(effectiveSchema, c.Table, c.EnumValue)
 		step.NonTx = true
 	case plan.ChangeRenameEnumValue:
-		step.SQL = fmt.Sprintf("ALTER TYPE %s RENAME VALUE %s TO %s;", quoteIdentifier(c.Table), quoteStringLiteral(c.OldEnumValue), quoteStringLiteral(c.EnumValue))
+		step.SQL = GenerateRenameEnumValueSQL(effectiveSchema, c.Table, c.OldEnumValue, c.EnumValue)
 		step.OldEnumValue = c.OldEnumValue
 		step.EnumValue = c.EnumValue
 	case plan.ChangeDropEnumValue:
+		step.SQL = fmt.Sprintf("-- NOTICE: PostgreSQL does not support in-place enum value drop: enum %s label %s remains in catalog;", qualifyType(effectiveSchema, c.Table), quoteStringLiteral(c.OldEnumValue))
 		step.OldEnumValue = c.OldEnumValue
 	case plan.ChangeCreateRangeType:
 		step.SQL = GenerateCreateRangeTypeSQL(effectiveSchema, c.RangeType)
-	case plan.ChangeDropRangeType:
+	case plan.ChangeDropRangeType, plan.ChangeDropRangeRetype:
 		step.SQL = GenerateDropTypeSQL(effectiveSchema, c.Table)
 	case plan.ChangeCreateCompositeType:
 		step.SQL = GenerateCreateCompositeTypeSQL(effectiveSchema, c.CompositeType)
 	case plan.ChangeAlterCompositeType:
 		step.SQL = GenerateAlterCompositeTypeSQL(effectiveSchema, c.Table, c.CompositeAttr, c.Destructive, c.TypeChanged)
-	case plan.ChangeDropCompositeType:
+	case plan.ChangeDropCompositeType, plan.ChangeDropCompositeRetype:
 		step.SQL = GenerateDropTypeSQL(effectiveSchema, c.Table)
 	case plan.ChangeCreateSequence:
 		step.SQL = GenerateCreateSequenceSQL(effectiveSchema, c.Sequence)

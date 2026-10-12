@@ -14,11 +14,14 @@ var (
 	commentOnColumnRe = regexp.MustCompile(
 		`(?is)^\s*COMMENT\s+ON\s+COLUMN\s+((?:[^\s;]+|"(?:[^"]|"")*")+)(?:[\s;]|$)`)
 
+	commentOnGeneralRe = regexp.MustCompile(
+		`(?is)^\s*COMMENT\s+ON\s+(?:VIEW|INDEX|MATERIALIZED\s+VIEW|TYPE|DOMAIN|TRIGGER|FUNCTION|PROCEDURE|SEQUENCE)\s+((?:[^\s;]+|"(?:[^"]|"")*")+)(?:[\s;]|$)`)
+
 	alterTableEnableRLSRe = regexp.MustCompile(
 		`(?is)^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?(?:IF\s+EXISTS\s+)?((?:[^\s;]+|"(?:[^"]|"")*")+)\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY\b`)
 
 	enableRLSRe = regexp.MustCompile(
-		`(?is)^\s*ENABLE\s+ROW\s+LEVEL\s+SECURITY\b`)
+		`(?is)^\s*ALTER\s+TABLE\s+.*?\bENABLE\s+ROW\s+LEVEL\s+SECURITY\b|^\s*ENABLE\s+ROW\s+LEVEL\s+SECURITY\b`)
 
 	createPolicyRe = regexp.MustCompile(
 		`(?is)^\s*CREATE\s+POLICY\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:[^\s;]+|"(?:[^"]|"")*")+)\s+ON\s+((?:[^\s;]+|"(?:[^"]|"")*")+)(?:[\s;]|$)`)
@@ -54,7 +57,7 @@ func (r UnsupportedSQLiteFeature) Check(s *schema.Schema) []Diagnostic {
 
 	var diags []Diagnostic
 	for _, rawStmt := range schema.SplitStatements(s.SourceSQL) {
-		stmt := strings.TrimSpace(schema.StripLeadingSQLComments(rawStmt))
+		stmt := strings.TrimSpace(schema.StripComments(rawStmt))
 		if stmt == "" {
 			continue
 		}
@@ -78,6 +81,17 @@ func (r UnsupportedSQLiteFeature) Check(s *schema.Schema) []Diagnostic {
 				Table:    tbl,
 				Column:   col,
 				Message:  "SQLite does not support COMMENT ON; column comments in SchemaSQL are ignored (no catalog metadata)",
+			})
+			continue
+		}
+
+		if m := commentOnGeneralRe.FindStringSubmatch(stmt); m != nil {
+			target := schema.CleanIdentifier(m[1])
+			diags = append(diags, Diagnostic{
+				RuleID:   "L013",
+				Severity: SeverityWarning,
+				Table:    target,
+				Message:  "SQLite does not support COMMENT ON; comments in SchemaSQL are ignored (no catalog metadata)",
 			})
 			continue
 		}

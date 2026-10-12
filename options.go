@@ -628,12 +628,12 @@ func resolveDropPolicy(opts Options) plan.DropPolicy {
 		allowType = *opts.AllowDropType
 	}
 
-	allowRangeType := opts.AllowDrop || allowType
+	allowRangeType := allowType
 	if opts.AllowDropRangeType != nil {
 		allowRangeType = *opts.AllowDropRangeType
 	}
 
-	allowCompositeType := opts.AllowDrop || allowType
+	allowCompositeType := allowType
 	if opts.AllowDropCompositeType != nil {
 		allowCompositeType = *opts.AllowDropCompositeType
 	}

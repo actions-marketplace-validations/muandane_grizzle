@@ -29,7 +29,7 @@ func TestBuildIdempotentInsert(t *testing.T) {
 			table:          "users",
 			columns:        []string{"id", "email"},
 			conflictTarget: "id",
-			want:           `INSERT INTO "users" ("id", "email") VALUES ... ON CONFLICT (id) DO NOTHING;`,
+			want:           `INSERT INTO "users" ("id", "email") VALUES ... ON CONFLICT ("id") DO NOTHING;`,
 		},
 		{
 			name:           "upsert updating single column",
@@ -37,7 +37,7 @@ func TestBuildIdempotentInsert(t *testing.T) {
 			columns:        []string{"id", "name"},
 			conflictTarget: "id",
 			updateColumns:  []string{"name"},
-			want:           `INSERT INTO "users" ("id", "name") VALUES ... ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name;`,
+			want:           `INSERT INTO "users" ("id", "name") VALUES ... ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name";`,
 		},
 		{
 			name:           "upsert updating multiple columns",
@@ -45,7 +45,7 @@ func TestBuildIdempotentInsert(t *testing.T) {
 			columns:        []string{"id", "name", "email"},
 			conflictTarget: "id",
 			updateColumns:  []string{"name", "email"},
-			want:           `INSERT INTO "users" ("id", "name", "email") VALUES ... ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, email = EXCLUDED.email;`,
+			want:           `INSERT INTO "users" ("id", "name", "email") VALUES ... ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "email" = EXCLUDED."email";`,
 		},
 		{
 			name:           "handles already quoted table and columns",
@@ -60,7 +60,7 @@ func TestBuildIdempotentInsert(t *testing.T) {
 			columns:        []string{"org_id", "user_id", "role"},
 			conflictTarget: "org_id, user_id",
 			updateColumns:  []string{"role"},
-			want:           `INSERT INTO "memberships" ("org_id", "user_id", "role") VALUES ... ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role;`,
+			want:           `INSERT INTO "memberships" ("org_id", "user_id", "role") VALUES ... ON CONFLICT ("org_id", "user_id") DO UPDATE SET "role" = EXCLUDED."role";`,
 		},
 		{
 			name:           "empty columns",

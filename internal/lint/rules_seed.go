@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	insertStmtRe     = regexp.MustCompile(`(?is)^\s*INSERT\b`)
-	insertTableRe    = regexp.MustCompile(`(?is)^\s*INSERT\s+(?:OR\s+\w+\s+)?(?:INTO\s+)?([^\s(;,]+)`)
+	insertStmtRe     = regexp.MustCompile(`(?is)^\s*(?:WITH\s+.*?\s+)?INSERT\b`)
+	insertTableRe    = regexp.MustCompile(`(?is)\bINSERT\s+(?:OR\s+\w+\s+)?(?:INTO\s+)?([^\s(;,]+)`)
 	onConflictRe     = regexp.MustCompile(`(?is)\bON\s+CONFLICT\b`)
 	whereNotExistsRe = regexp.MustCompile(`(?is)\bWHERE\s+NOT\s+EXISTS\b`)
 	orIgnoreRe       = regexp.MustCompile(`(?is)\bOR\s+IGNORE\b`)
@@ -18,8 +18,8 @@ var (
 	truncateStmtRe  = regexp.MustCompile(`(?is)^\s*TRUNCATE\b`)
 	truncateTableRe = regexp.MustCompile(`(?is)^\s*TRUNCATE(?:\s+TABLE)?(?:\s+ONLY)?\s+([^\s,;(]+)`)
 
-	deleteStmtRe  = regexp.MustCompile(`(?is)^\s*DELETE\b`)
-	deleteTableRe = regexp.MustCompile(`(?is)^\s*DELETE(?:\s+FROM)?(?:\s+ONLY)?\s+([^\s,;(]+)`)
+	deleteStmtRe  = regexp.MustCompile(`(?is)^\s*(?:WITH\s+.*?\s+)?DELETE\b`)
+	deleteTableRe = regexp.MustCompile(`(?is)\bDELETE(?:\s+FROM)?(?:\s+ONLY)?\s+([^\s,;(]+)`)
 	whereRe       = regexp.MustCompile(`(?is)\bWHERE\b`)
 )
 
@@ -51,20 +51,19 @@ func (NonIdempotentSeed) Check(s *schema.Schema) []Diagnostic {
 func LintSeedSQL(seedSQL string) []Diagnostic {
 	var diags []Diagnostic
 	for _, stmt := range schema.SplitStatements(seedSQL) {
-		trimmed := schema.StripLeadingSQLComments(stmt)
-		trimmed = strings.TrimSpace(trimmed)
-		if trimmed == "" {
+		clean := strings.TrimSpace(schema.StripCommentsAndLiterals(stmt))
+		if clean == "" {
 			continue
 		}
 
 		switch {
-		case insertStmtRe.MatchString(trimmed):
-			if !onConflictRe.MatchString(trimmed) &&
-				!whereNotExistsRe.MatchString(trimmed) &&
-				!orIgnoreRe.MatchString(trimmed) &&
-				!orReplaceRe.MatchString(trimmed) {
+		case insertStmtRe.MatchString(clean):
+			if !onConflictRe.MatchString(clean) &&
+				!whereNotExistsRe.MatchString(clean) &&
+				!orIgnoreRe.MatchString(clean) &&
+				!orReplaceRe.MatchString(clean) {
 				var tableName string
-				if m := insertTableRe.FindStringSubmatch(trimmed); len(m) > 1 {
+				if m := insertTableRe.FindStringSubmatch(clean); len(m) > 1 {
 					tableName = schema.CleanIdentifier(m[1])
 				}
 				diags = append(diags, Diagnostic{
@@ -74,9 +73,9 @@ func LintSeedSQL(seedSQL string) []Diagnostic {
 					Message:  "INSERT statement has no conflict or existence guard (ON CONFLICT / WHERE NOT EXISTS); re-executing SeedSQL may duplicate data or violate unique constraints",
 				})
 			}
-		case truncateStmtRe.MatchString(trimmed):
+		case truncateStmtRe.MatchString(clean):
 			var tableName string
-			if m := truncateTableRe.FindStringSubmatch(trimmed); len(m) > 1 {
+			if m := truncateTableRe.FindStringSubmatch(clean); len(m) > 1 {
 				tableName = schema.CleanIdentifier(m[1])
 			}
 			diags = append(diags, Diagnostic{
@@ -85,10 +84,10 @@ func LintSeedSQL(seedSQL string) []Diagnostic {
 				Table:    tableName,
 				Message:  "TRUNCATE in SeedSQL wipes existing data; ensure this destructive operation is intended only for development environments",
 			})
-		case deleteStmtRe.MatchString(trimmed):
-			if !whereRe.MatchString(trimmed) {
+		case deleteStmtRe.MatchString(clean):
+			if !whereRe.MatchString(clean) {
 				var tableName string
-				if m := deleteTableRe.FindStringSubmatch(trimmed); len(m) > 1 {
+				if m := deleteTableRe.FindStringSubmatch(clean); len(m) > 1 {
 					tableName = schema.CleanIdentifier(m[1])
 				}
 				diags = append(diags, Diagnostic{

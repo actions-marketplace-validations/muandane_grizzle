@@ -199,7 +199,7 @@ Most schema constructs declared in `SchemaSQL` are managed declaratively (tables
 
 For production deployments requiring human-in-the-loop review or strict CI/CD gatekeeping, Grizzle supports a decoupled Plan and Apply workflow:
 
-1. **Deterministic Plan Hash**: `Plan.Hash()` calculates a SHA-256 digest over the canonical list of migration steps, scope configurations, and rename mappings.
+1. **Deterministic Plan Hash**: `Plan.Hash()` calculates a SHA-256 digest over the canonical list of migration steps (including step metadata and definitions), scope configurations, rename mappings, drop policies (all 21 granular gates), `NonConcurrentIndexes`, and declared `SchemaSQL`, `RolesSQL`, and `CatalogSQL`.
 2. **Approval Verification**:
    ```go
    // In CI / Review phase:

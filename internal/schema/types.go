@@ -2,7 +2,6 @@ package schema
 
 import (
 	"regexp"
-	"strings"
 )
 
 // Schema represents the parsed relational structure of a database schema.
@@ -52,9 +51,9 @@ type Routine struct {
 }
 
 // RoutineKey returns the map key identifying a routine: its name plus the
-// identity arguments that disambiguate overloads.
+// canonical identity arguments that disambiguate overloads.
 func RoutineKey(name, identityArgs string) string {
-	return name + "(" + strings.TrimSpace(identityArgs) + ")"
+	return name + "(" + NormalizeIdentityArgs(identityArgs) + ")"
 }
 
 // Domain represents a managed PostgreSQL domain (CREATE DOMAIN).

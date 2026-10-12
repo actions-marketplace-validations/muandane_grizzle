@@ -32,8 +32,8 @@ func SortSteps(steps []Step) {
 		ChangeDropTrigger:           27, // 2d. Drop triggers before column/table drops or function replaces
 		ChangeDropAggregate:         28, // 2e'. Drop aggregates before their support functions (pg_depend)
 		ChangeDropDomainRetype:      28, // 2e''. Drop rebuilt domains before the replacement CREATE_DOMAIN
-		ChangeDropCompositeType:     28, // 2e'''. Drop composite types before recreating
-		ChangeDropRangeType:         28, // 2e''''. Drop range types before recreating
+		ChangeDropCompositeRetype:   28, // 2e'''. Drop rebuilt composite types before recreating
+		ChangeDropRangeRetype:       28, // 2e''''. Drop rebuilt range types before recreating
 		ChangeDropView:              28, // 2e. Drop views before underlying table drops
 		ChangeDropFunction:          29, // 2f. Drop functions after dependents
 		ChangeDropExtension:         29, // 2g. Drop extensions last among early drops
@@ -74,6 +74,8 @@ func SortSteps(steps []Step) {
 		ChangeDropColumn:            90,  // 11. Drop columns (if allowed)
 		ChangeDropTable:             100, // 12. Drop tables (if allowed)
 		ChangeDropDomain:            101, // 13. Drop domains after dependent tables/columns are gone
+		ChangeDropRangeType:         101, // 13'. Drop range types after dependent tables/columns are gone
+		ChangeDropCompositeType:     101, // 13''. Drop composite types after dependent tables/columns are gone
 		ChangeDropSequence:          102, // 13b. Drop sequences after dependent tables are gone
 		ChangeCreateRole:            119, // 14. Create roles before grants reference them
 		ChangeAlterRole:             120, // 14a. Role attrs/password/config after create

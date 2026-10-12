@@ -207,6 +207,163 @@ func joinStatements(stmts []string) string {
 	return strings.Join(stmts, ";\n") + ";"
 }
 
+// StripCommentsAndLiterals replaces comments (-- line and /* block */) and string literals
+// ('...' and $$...$$) with whitespace, leaving only the structural SQL tokens.
+func StripCommentsAndLiterals(sql string) string {
+	var b strings.Builder
+	n := len(sql)
+	i := 0
+	for i < n {
+		ch := sql[i]
+
+		// Single-line comment: replace with space
+		if ch == '-' && i+1 < n && sql[i+1] == '-' {
+			for i < n && sql[i] != '\n' {
+				i++
+			}
+			b.WriteByte(' ')
+			continue
+		}
+
+		// Multi-line comment: replace with space
+		if ch == '/' && i+1 < n && sql[i+1] == '*' {
+			i += 2
+			for i < n {
+				if sql[i] == '*' && i+1 < n && sql[i+1] == '/' {
+					i += 2
+					break
+				}
+				i++
+			}
+			b.WriteByte(' ')
+			continue
+		}
+
+		// Single-quoted string literal: replace with empty string literal ''
+		if ch == '\'' {
+			i++
+			for i < n {
+				if sql[i] == '\'' {
+					if i+1 < n && sql[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			b.WriteString("''")
+			continue
+		}
+
+		// Dollar-quoted string literal: $$ or $tag$
+		if ch == '$' {
+			if tagEnd := strings.IndexByte(sql[i+1:], '$'); tagEnd >= 0 {
+				tag := sql[i : i+1+tagEnd+1]
+				isValidTag := true
+				for _, tc := range tag[1 : len(tag)-1] {
+					if !isDollarTagChar(tc) {
+						isValidTag = false
+						break
+					}
+				}
+				if isValidTag {
+					i += len(tag)
+					if closeIdx := strings.Index(sql[i:], tag); closeIdx >= 0 {
+						i += closeIdx + len(tag)
+						b.WriteString("''")
+						continue
+					}
+				}
+			}
+		}
+
+		b.WriteByte(ch)
+		i++
+	}
+	return b.String()
+}
+
+// StripComments removes SQL comments (-- line and /* block */) while preserving string literals and tokens.
+func StripComments(sql string) string {
+	var b strings.Builder
+	n := len(sql)
+	i := 0
+	for i < n {
+		ch := sql[i]
+
+		// Single-line comment: replace with space
+		if ch == '-' && i+1 < n && sql[i+1] == '-' {
+			for i < n && sql[i] != '\n' {
+				i++
+			}
+			b.WriteByte(' ')
+			continue
+		}
+
+		// Multi-line comment: replace with space
+		if ch == '/' && i+1 < n && sql[i+1] == '*' {
+			i += 2
+			for i < n {
+				if sql[i] == '*' && i+1 < n && sql[i+1] == '/' {
+					i += 2
+					break
+				}
+				i++
+			}
+			b.WriteByte(' ')
+			continue
+		}
+
+		// Single-quoted string literal: preserve verbatim
+		if ch == '\'' {
+			start := i
+			i++
+			for i < n {
+				if sql[i] == '\'' {
+					if i+1 < n && sql[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			b.WriteString(sql[start:i])
+			continue
+		}
+
+		// Dollar-quoted string literal: preserve verbatim
+		if ch == '$' {
+			if tagEnd := strings.IndexByte(sql[i+1:], '$'); tagEnd >= 0 {
+				tag := sql[i : i+1+tagEnd+1]
+				isValidTag := true
+				for _, tc := range tag[1 : len(tag)-1] {
+					if !isDollarTagChar(tc) {
+						isValidTag = false
+						break
+					}
+				}
+				if isValidTag {
+					start := i
+					i += len(tag)
+					if closeIdx := strings.Index(sql[i:], tag); closeIdx >= 0 {
+						i += closeIdx + len(tag)
+						b.WriteString(sql[start:i])
+						continue
+					}
+				}
+			}
+		}
+
+		b.WriteByte(ch)
+		i++
+	}
+	return b.String()
+}
+
 // ParseExtensions extracts CREATE EXTENSION statements from schema SQL.
 // Keys are lowercased extension names. Schema is empty when WITH SCHEMA is omitted.
 func ParseExtensions(sql string) map[string]*Extension {
@@ -260,4 +417,8 @@ func FindDMLStatements(sql string) []string {
 		}
 	}
 	return out
+}
+
+func isDollarTagChar(tc rune) bool {
+	return (tc >= 'a' && tc <= 'z') || (tc >= 'A' && tc <= 'Z') || (tc >= '0' && tc <= '9') || tc == '_'
 }

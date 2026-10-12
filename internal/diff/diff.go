@@ -1053,8 +1053,8 @@ func diffRoutines(live, desired *schema.Schema, targetSchema string, normalize f
 			})
 			continue
 		}
-		if lR.IdentityArgs != dCopy.IdentityArgs ||
-			lR.ReturnType != dCopy.ReturnType ||
+		if schema.NormalizeIdentityArgs(lR.IdentityArgs) != schema.NormalizeIdentityArgs(dCopy.IdentityArgs) ||
+			schema.NormalizeType(lR.ReturnType) != schema.NormalizeType(dCopy.ReturnType) ||
 			lR.Kind != dR.Kind || lR.Language != dR.Language {
 			lCopy := *lR
 			lCopy.IdentityArgs = normalize(lR.IdentityArgs)
@@ -1758,7 +1758,6 @@ func diffEnums(live, desired *schema.Schema, targetSchema string, filters scope.
 			continue
 		}
 
-		renamedOld := make(map[string]bool)
 		renamedNew := make(map[string]bool)
 
 		for _, lVal := range lEnum.Values {
@@ -1769,8 +1768,7 @@ func diffEnums(live, desired *schema.Schema, targetSchema string, filters scope.
 				newMappedVal = target
 			}
 
-			if newMappedVal != "" {
-				renamedOld[lVal] = true
+			if newMappedVal != "" && slices.Contains(dEnum.Values, newMappedVal) && newMappedVal != lVal && !renamedNew[newMappedVal] {
 				renamedNew[newMappedVal] = true
 				changes = append(changes, Change{
 					Type:         plan.ChangeRenameEnumValue,
@@ -1833,7 +1831,7 @@ func diffRangeTypes(live, desired *schema.Schema, targetSchema string) []Change 
 
 		if schema.NormalizeType(lRange.Subtype) != schema.NormalizeType(dRange.Subtype) {
 			changes = append(changes, Change{
-				Type:        plan.ChangeDropRangeType,
+				Type:        plan.ChangeDropRangeRetype,
 				Schema:      targetSchema,
 				Table:       name,
 				RangeType:   lRange,
@@ -1939,7 +1937,7 @@ func diffCompositeTypes(live, desired *schema.Schema, targetSchema string) []Cha
 						CompositeType: dComp,
 						CompositeAttr: dAttr,
 						TypeChanged:   true,
-						Destructive:   false,
+						Destructive:   true,
 					})
 				}
 			}
