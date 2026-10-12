@@ -16,7 +16,7 @@ import (
 	"github.com/muandane/grizzle/internal/testutil"
 )
 
-func getTestDB(t *testing.T) *sql.DB {
+func getTestDB(t testing.TB) *sql.DB {
 	t.Helper()
 	dsn := testutil.PostgresDSN()
 
@@ -40,7 +40,7 @@ func getTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func resetPublicSchema(t *testing.T, db *sql.DB) {
+func resetPublicSchema(t testing.TB, db *sql.DB) {
 	t.Helper()
 	_, err := db.Exec("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;")
 	if err != nil {

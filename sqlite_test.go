@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func getSQLiteDB(t *testing.T) *sql.DB {
+func getSQLiteDB(t testing.TB) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
