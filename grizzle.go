@@ -146,6 +146,9 @@ const (
 	ChangeCreateCompositeType = plan.ChangeCreateCompositeType
 	ChangeAlterCompositeType  = plan.ChangeAlterCompositeType
 	ChangeDropCompositeType   = plan.ChangeDropCompositeType
+	ChangeCreateSequence      = plan.ChangeCreateSequence
+	ChangeAlterSequence       = plan.ChangeAlterSequence
+	ChangeDropSequence        = plan.ChangeDropSequence
 )
 
 // HazardCode constants
@@ -176,6 +179,7 @@ const (
 	HazardDropDomain             = plan.HazardDropDomain
 	HazardDropRangeType          = plan.HazardDropRangeType
 	HazardDropCompositeType      = plan.HazardDropCompositeType
+	HazardDropSequence           = plan.HazardDropSequence
 )
 
 // UnmanagedObject represents an unmanaged database object detected during introspection.
@@ -186,6 +190,9 @@ type ExtensionIR = schema.Extension
 
 // RoutineIR represents the intermediate representation of a function or procedure.
 type RoutineIR = schema.Routine
+
+// SequenceIR represents the intermediate representation of a database sequence generator.
+type SequenceIR = schema.Sequence
 
 // ViewIR represents the intermediate representation of a view or materialized view.
 type ViewIR = schema.View
@@ -595,6 +602,7 @@ func optionsFromPlan(p *Plan, opts ApplyOpts) Options {
 		AllowDropDomain:          &p.Policy.AllowDomain,
 		AllowDropRangeType:       &p.Policy.AllowRangeType,
 		AllowDropCompositeType:   &p.Policy.AllowCompositeType,
+		AllowDropSequence:        &p.Policy.AllowDropSequence,
 		AllowRevoke:              p.Policy.AllowRevoke,
 		AllowDropRole:            p.Policy.AllowDropRole,
 		AllowDropPublication:     p.Policy.AllowDropPublication,
@@ -706,6 +714,7 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 		case plan.ChangeCreateEnum, plan.ChangeAlterEnum, plan.ChangeRenameEnumValue, plan.ChangeDropEnumValue,
 			plan.ChangeCreateRangeType, plan.ChangeDropRangeType,
 			plan.ChangeCreateCompositeType, plan.ChangeAlterCompositeType, plan.ChangeDropCompositeType,
+			plan.ChangeCreateSequence, plan.ChangeAlterSequence, plan.ChangeDropSequence,
 			plan.ChangeCreateExtension, plan.ChangeDropExtension,
 			plan.ChangeCreateFunction, plan.ChangeDropFunction,
 			plan.ChangeCreateView, plan.ChangeDropView:

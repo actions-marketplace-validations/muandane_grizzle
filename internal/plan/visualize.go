@@ -44,15 +44,15 @@ func (p *Plan) Format(w io.Writer, useColor bool) error {
 
 		switch s.Type {
 		case ChangeCreateEnum, ChangeCreateTable, ChangeAddColumn, ChangeCreateIndex, ChangeAddFK, ChangeAddCheck,
-			ChangeCreateRangeType, ChangeCreateCompositeType:
+			ChangeCreateRangeType, ChangeCreateCompositeType, ChangeCreateSequence:
 			symbol = "+"
 			color = colorGreen
 		case ChangeAlterColumn, ChangeAlterEnum, ChangeRenameEnumValue,
-			ChangeAlterCompositeType:
+			ChangeAlterCompositeType, ChangeAlterSequence:
 			symbol = "~"
 			color = colorYellow
 		case ChangeDropTable, ChangeDropColumn, ChangeDropIndex, ChangeDropFK, ChangeDropCheck, ChangeDropEnumValue,
-			ChangeDropRangeType, ChangeDropCompositeType:
+			ChangeDropRangeType, ChangeDropCompositeType, ChangeDropSequence:
 			symbol = "-"
 			color = colorRed
 		}
@@ -151,13 +151,13 @@ func (p *Plan) FormatInteractiveSummary(w io.Writer) error {
 		} else {
 			switch s.Type {
 			case ChangeCreateEnum, ChangeCreateTable, ChangeAddColumn, ChangeCreateIndex, ChangeAddFK, ChangeAddCheck, ChangeAttachPartition,
-				ChangeCreateRangeType, ChangeCreateCompositeType:
+				ChangeCreateRangeType, ChangeCreateCompositeType, ChangeCreateSequence:
 				symbol = "+"
 			case ChangeAlterColumn, ChangeAlterEnum, ChangeValidateConstraint, ChangeRenameColumn, ChangeRenameEnumValue,
-				ChangeAlterCompositeType:
+				ChangeAlterCompositeType, ChangeAlterSequence:
 				symbol = "~"
 			case ChangeDropTable, ChangeDropColumn, ChangeDropIndex, ChangeDropFK, ChangeDropCheck, ChangeDetachPartition, ChangeDropEnumValue,
-				ChangeDropRangeType, ChangeDropCompositeType:
+				ChangeDropRangeType, ChangeDropCompositeType, ChangeDropSequence:
 				symbol = "-"
 			}
 		}
@@ -230,6 +230,8 @@ func hazardRemediation(code HazardCode) string {
 		return "allow via DropPolicy AllowRangeType and accept DROP_RANGE_TYPE; dependent tables or columns will lose the type"
 	case HazardDropCompositeType:
 		return "allow via DropPolicy AllowCompositeType and accept DROP_COMPOSITE_TYPE; dependent tables or columns will lose the type"
+	case HazardDropSequence:
+		return "allow via DropPolicy AllowDropSequence and accept DROP_SEQUENCE; sequence generator and current value will be permanently lost"
 	default:
 		// Exhaustiveness: new CRITICAL hazard codes should add a hint here.
 		// WARNING/NOTICE codes carry their own description.
@@ -500,6 +502,21 @@ func stepOperationSummary(s Step) string {
 
 	case ChangeDropCompositeType:
 		return fmt.Sprintf("DROP TYPE %s", tbl)
+
+	case ChangeCreateSequence:
+		return fmt.Sprintf("CREATE SEQUENCE %s", tbl)
+
+	case ChangeAlterSequence:
+		if s.Sequence != nil && (s.Sequence.OwnedByTable != "" || (s.OldSequence != nil && s.OldSequence.OwnedByTable != "")) {
+			if s.Sequence.OwnedByTable == "" || s.Sequence.OwnedByTable == "NONE" {
+				return fmt.Sprintf("ALTER SEQUENCE %s OWNED BY NONE", tbl)
+			}
+			return fmt.Sprintf("ALTER SEQUENCE %s OWNED BY %s.%s", tbl, s.Sequence.OwnedByTable, s.Sequence.OwnedByColumn)
+		}
+		return fmt.Sprintf("ALTER SEQUENCE %s", tbl)
+
+	case ChangeDropSequence:
+		return fmt.Sprintf("DROP SEQUENCE %s", tbl)
 
 	default:
 		return strings.TrimSuffix(strings.TrimSpace(s.SQL), ";")

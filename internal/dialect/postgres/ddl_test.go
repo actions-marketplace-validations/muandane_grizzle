@@ -94,3 +94,136 @@ func TestRenderChange_RenameEnumValue(t *testing.T) {
 		t.Errorf("step OldEnumValue/EnumValue mismatch: old=%q new=%q", step.OldEnumValue, step.EnumValue)
 	}
 }
+
+func TestGenerateSequenceSQL(t *testing.T) {
+	t.Run("CreateSequence_Default", func(t *testing.T) {
+		seq := &schema.Sequence{
+			Name: "order_seq",
+		}
+		sql := postgres.GenerateCreateSequenceSQL("public", seq)
+		expected := `CREATE SEQUENCE "public"."order_seq";`
+		if sql != expected {
+			t.Errorf("got %q, want %q", sql, expected)
+		}
+	})
+
+	t.Run("CreateSequence_FullParameters", func(t *testing.T) {
+		var minVal int64 = 10
+		var maxVal int64 = 1000
+		seq := &schema.Sequence{
+			Name:      "custom_seq",
+			DataType:  "integer",
+			Start:     50,
+			Increment: 5,
+			MinValue:  &minVal,
+			MaxValue:  &maxVal,
+			Cache:     20,
+			Cycle:     true,
+		}
+		sql := postgres.GenerateCreateSequenceSQL("app", seq)
+		expected := `CREATE SEQUENCE "app"."custom_seq" AS integer INCREMENT BY 5 MINVALUE 10 MAXVALUE 1000 START WITH 50 CACHE 20 CYCLE;`
+		if sql != expected {
+			t.Errorf("got %q, want %q", sql, expected)
+		}
+	})
+
+	t.Run("AlterSequence_Params", func(t *testing.T) {
+		oldSeq := &schema.Sequence{
+			Name:      "param_seq",
+			Increment: 1,
+			Cache:     1,
+			Cycle:     false,
+		}
+		newSeq := &schema.Sequence{
+			Name:      "param_seq",
+			Increment: 10,
+			Cache:     5,
+			Cycle:     true,
+		}
+		sql := postgres.GenerateAlterSequenceSQL("public", "param_seq", oldSeq, newSeq)
+		expected := `ALTER SEQUENCE "public"."param_seq" INCREMENT BY 10 CACHE 5 CYCLE;`
+		if sql != expected {
+			t.Errorf("got %q, want %q", sql, expected)
+		}
+	})
+
+	t.Run("AlterSequence_Ownership_SchemaQualified", func(t *testing.T) {
+		newSeq := &schema.Sequence{
+			Name:          "invoice_seq",
+			OwnedByTable:  "invoices",
+			OwnedByColumn: "id",
+		}
+		sql := postgres.GenerateAlterSequenceSQL("public", "invoice_seq", nil, newSeq)
+		expected := `ALTER SEQUENCE "public"."invoice_seq" OWNED BY "public"."invoices"."id";`
+		if sql != expected {
+			t.Errorf("got %q, want %q", sql, expected)
+		}
+	})
+
+	t.Run("AlterSequence_Ownership_CrossSchema", func(t *testing.T) {
+		newSeq := &schema.Sequence{
+			Name:          "cross_seq",
+			OwnedByTable:  "billing.invoices",
+			OwnedByColumn: "invoice_no",
+		}
+		sql := postgres.GenerateAlterSequenceSQL("public", "cross_seq", nil, newSeq)
+		expected := `ALTER SEQUENCE "public"."cross_seq" OWNED BY "billing"."invoices"."invoice_no";`
+		if sql != expected {
+			t.Errorf("got %q, want %q", sql, expected)
+		}
+	})
+
+	t.Run("AlterSequence_Ownership_Detach", func(t *testing.T) {
+		oldSeq := &schema.Sequence{
+			Name:          "free_seq",
+			OwnedByTable:  "legacy_table",
+			OwnedByColumn: "col",
+		}
+		newSeq := &schema.Sequence{
+			Name:         "free_seq",
+			OwnedByTable: "NONE",
+		}
+		sql := postgres.GenerateAlterSequenceSQL("public", "free_seq", oldSeq, newSeq)
+		expected := `ALTER SEQUENCE "public"."free_seq" OWNED BY NONE;`
+		if sql != expected {
+			t.Errorf("got %q, want %q", sql, expected)
+		}
+	})
+
+	t.Run("DropSequence_IfExists", func(t *testing.T) {
+		sql := postgres.GenerateDropSequenceSQL("public", "stale_seq")
+		expected := `DROP SEQUENCE IF EXISTS "public"."stale_seq";`
+		if sql != expected {
+			t.Errorf("got %q, want %q", sql, expected)
+		}
+	})
+}
+
+func TestRenderChange_Sequences(t *testing.T) {
+	createChange := diff.Change{
+		Type:   plan.ChangeCreateSequence,
+		Schema: "public",
+		Table:  "orders_seq",
+		Sequence: &schema.Sequence{
+			Name: "orders_seq",
+		},
+	}
+	createStep := postgres.RenderChange("public", createChange)
+	if createStep.SQL != `CREATE SEQUENCE "public"."orders_seq";` {
+		t.Errorf("unexpected create SQL: %q", createStep.SQL)
+	}
+	if createStep.Sequence == nil || createStep.Sequence.Name != "orders_seq" {
+		t.Errorf("expected Sequence metadata on Step")
+	}
+
+	dropChange := diff.Change{
+		Type:        plan.ChangeDropSequence,
+		Schema:      "public",
+		Table:       "old_seq",
+		Destructive: true,
+	}
+	dropStep := postgres.RenderChange("public", dropChange)
+	if dropStep.SQL != `DROP SEQUENCE IF EXISTS "public"."old_seq";` {
+		t.Errorf("unexpected drop SQL: %q", dropStep.SQL)
+	}
+}

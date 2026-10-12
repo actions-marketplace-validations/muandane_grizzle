@@ -15,6 +15,7 @@ type Schema struct {
 	Domains        map[string]*Domain          `json:"domains,omitempty"`
 	RangeTypes     map[string]*RangeType       `json:"range_types,omitempty"`
 	CompositeTypes map[string]*CompositeType   `json:"composite_types,omitempty"`
+	Sequences      map[string]*Sequence        `json:"sequences,omitempty"`
 	Views          map[string]*View            `json:"views,omitempty"`
 	Unmanaged      map[string]*UnmanagedObject `json:"unmanaged,omitempty"`
 
@@ -89,6 +90,21 @@ type CompositeAttribute struct {
 	Name      string `json:"name"`
 	DataType  string `json:"type"`
 	Collation string `json:"collation,omitempty"`
+}
+
+// Sequence represents a managed PostgreSQL database sequence generator.
+type Sequence struct {
+	Schema        string `json:"schema,omitempty"`
+	Name          string `json:"name"`
+	DataType      string `json:"data_type,omitempty"`
+	Start         int64  `json:"start,omitempty"`
+	Increment     int64  `json:"increment,omitempty"`
+	MinValue      *int64 `json:"min_value,omitempty"`
+	MaxValue      *int64 `json:"max_value,omitempty"`
+	Cache         int64  `json:"cache,omitempty"`
+	Cycle         bool   `json:"cycle,omitempty"`
+	OwnedByTable  string `json:"owned_by_table,omitempty"`
+	OwnedByColumn string `json:"owned_by_column,omitempty"`
 }
 
 // View represents a managed SQL VIEW or MATERIALIZED VIEW.

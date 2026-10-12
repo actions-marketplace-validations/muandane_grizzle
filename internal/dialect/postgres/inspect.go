@@ -54,6 +54,7 @@ func Inspect(ctx context.Context, dbtx dialect.DBTX, schemaName string) (*schema
 		Routines:       make(map[string]*schema.Routine),
 		RangeTypes:     make(map[string]*schema.RangeType),
 		CompositeTypes: make(map[string]*schema.CompositeType),
+		Sequences:      make(map[string]*schema.Sequence),
 		Views:          make(map[string]*schema.View),
 		Unmanaged:      make(map[string]*schema.UnmanagedObject),
 	}
@@ -1034,19 +1035,37 @@ func Inspect(ctx context.Context, dbtx dialect.DBTX, schemaName string) (*schema
 		}
 	}
 
-	// 6e. Sequences not owned by managed tables
+	// 6e. Sequences (managed and unmanaged).
+	// Identity sequences (deptype = 'i') are internally managed by identity columns and excluded.
+	// Extension-owned sequences (deptype = 'e') are excluded.
 	seqQuery := `
 		SELECT
 			c.relname AS seq_name,
+			format_type(sq.seqtypid, NULL) AS data_type,
+			sq.seqstart AS start_val,
+			sq.seqincrement AS increment_val,
+			sq.seqmax AS max_val,
+			sq.seqmin AS min_val,
+			sq.seqcache AS cache_val,
+			sq.seqcycle AS is_cycle,
 			COALESCE(t.relname, '') AS owned_by_table,
 			COALESCE(a.attname, '') AS owned_by_col
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		LEFT JOIN pg_depend d ON d.objid = c.oid AND d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype = 'a'
+		JOIN pg_sequence sq ON sq.seqrelid = c.oid
+		LEFT JOIN pg_depend d ON d.objid = c.oid 
+		    AND d.classid = 'pg_class'::regclass 
+		    AND d.refclassid = 'pg_class'::regclass 
+		    AND d.deptype IN ('a', 'n')
 		LEFT JOIN pg_class t ON t.oid = d.refobjid
 		LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid
 		WHERE n.nspname = $1
 		  AND c.relkind = 'S'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM pg_depend dep 
+		      WHERE dep.objid = c.oid 
+		        AND dep.deptype IN ('e', 'i')
+		  )
 		ORDER BY c.relname;
 	`
 	seqRows, err := dbtx.QueryContext(ctx, seqQuery, schemaName)
@@ -1056,10 +1075,41 @@ func Inspect(ctx context.Context, dbtx dialect.DBTX, schemaName string) (*schema
 	defer func() { _ = seqRows.Close() }()
 
 	for seqRows.Next() {
-		var seqName, ownedTable, ownedCol string
-		if err := seqRows.Scan(&seqName, &ownedTable, &ownedCol); err != nil {
+		var (
+			seqName, dataType, ownedTable, ownedCol          string
+			startVal, incrementVal, maxVal, minVal, cacheVal int64
+			isCycle                                          bool
+		)
+		if err := seqRows.Scan(
+			&seqName,
+			&dataType,
+			&startVal,
+			&incrementVal,
+			&maxVal,
+			&minVal,
+			&cacheVal,
+			&isCycle,
+			&ownedTable,
+			&ownedCol,
+		); err != nil {
 			return nil, fmt.Errorf("scanning sequence in schema %q: %w", schemaName, err)
 		}
+
+		seq := &schema.Sequence{
+			Schema:        schemaName,
+			Name:          seqName,
+			DataType:      dataType,
+			Start:         startVal,
+			Increment:     incrementVal,
+			MinValue:      &minVal,
+			MaxValue:      &maxVal,
+			Cache:         cacheVal,
+			Cycle:         isCycle,
+			OwnedByTable:  ownedTable,
+			OwnedByColumn: ownedCol,
+		}
+		s.Sequences[seqName] = seq
+
 		if ownedTable == "" || s.Tables[ownedTable] == nil {
 			seqObj := &schema.UnmanagedObject{
 				Name: seqName,

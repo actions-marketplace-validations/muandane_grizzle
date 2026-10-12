@@ -523,6 +523,126 @@ func GenerateDropTypeSQL(targetSchema, typeName string) string {
 	return fmt.Sprintf("DROP TYPE %s;", qualifyType(targetSchema, typeName))
 }
 
+func qualifySequence(targetSchema, seqName string) string {
+	seqName = strings.TrimSpace(seqName)
+	if strings.Contains(seqName, ".") {
+		parts := strings.Split(seqName, ".")
+		for i, p := range parts {
+			parts[i] = fmt.Sprintf("%q", strings.Trim(p, `"`))
+		}
+		return strings.Join(parts, ".")
+	}
+	seqName = strings.Trim(seqName, `"`)
+	if targetSchema == "" {
+		return fmt.Sprintf("%q", seqName)
+	}
+	targetSchema = strings.Trim(targetSchema, `"`)
+	return fmt.Sprintf("%q.%q", targetSchema, seqName)
+}
+
+// GenerateCreateSequenceSQL constructs a CREATE SEQUENCE statement.
+func GenerateCreateSequenceSQL(targetSchema string, seq *schema.Sequence) string {
+	if seq == nil {
+		return ""
+	}
+	ident := qualifySequence(targetSchema, seq.Name)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "CREATE SEQUENCE %s", ident)
+
+	if seq.DataType != "" && !strings.EqualFold(seq.DataType, "bigint") {
+		fmt.Fprintf(&sb, " AS %s", seq.DataType)
+	}
+	if seq.Increment != 0 && seq.Increment != 1 {
+		fmt.Fprintf(&sb, " INCREMENT BY %d", seq.Increment)
+	}
+	if seq.MinValue != nil {
+		fmt.Fprintf(&sb, " MINVALUE %d", *seq.MinValue)
+	}
+	if seq.MaxValue != nil {
+		fmt.Fprintf(&sb, " MAXVALUE %d", *seq.MaxValue)
+	}
+	if seq.Start != 0 && seq.Start != 1 {
+		fmt.Fprintf(&sb, " START WITH %d", seq.Start)
+	}
+	if seq.Cache > 1 {
+		fmt.Fprintf(&sb, " CACHE %d", seq.Cache)
+	}
+	if seq.Cycle {
+		sb.WriteString(" CYCLE")
+	}
+	sb.WriteString(";")
+	return sb.String()
+}
+
+// GenerateAlterSequenceSQL constructs an ALTER SEQUENCE statement for parameter or ownership changes.
+func GenerateAlterSequenceSQL(targetSchema, seqName string, oldSeq, newSeq *schema.Sequence) string {
+	if newSeq == nil {
+		return ""
+	}
+	ident := qualifySequence(targetSchema, seqName)
+	var parts []string
+
+	// Ownership change:
+	if oldSeq == nil || oldSeq.OwnedByTable != newSeq.OwnedByTable || oldSeq.OwnedByColumn != newSeq.OwnedByColumn {
+		if newSeq.OwnedByTable == "" || strings.EqualFold(newSeq.OwnedByTable, "NONE") {
+			parts = append(parts, "OWNED BY NONE")
+		} else {
+			sch := targetSchema
+			tbl := newSeq.OwnedByTable
+			if strings.Contains(tbl, ".") {
+				split := strings.Split(tbl, ".")
+				sch = split[0]
+				tbl = split[1]
+			} else if newSeq.Schema != "" {
+				sch = newSeq.Schema
+			}
+			if sch != "" {
+				parts = append(parts, fmt.Sprintf("OWNED BY %q.%q.%q", strings.Trim(sch, `"`), strings.Trim(tbl, `"`), strings.Trim(newSeq.OwnedByColumn, `"`)))
+			} else {
+				parts = append(parts, fmt.Sprintf("OWNED BY %q.%q", strings.Trim(tbl, `"`), strings.Trim(newSeq.OwnedByColumn, `"`)))
+			}
+		}
+	}
+
+	// Parameter changes:
+	if oldSeq != nil {
+		if newSeq.Increment != 0 && newSeq.Increment != oldSeq.Increment {
+			parts = append(parts, fmt.Sprintf("INCREMENT BY %d", newSeq.Increment))
+		}
+		if newSeq.MinValue == nil && oldSeq.MinValue != nil {
+			parts = append(parts, "NO MINVALUE")
+		} else if newSeq.MinValue != nil && (oldSeq.MinValue == nil || *newSeq.MinValue != *oldSeq.MinValue) {
+			parts = append(parts, fmt.Sprintf("MINVALUE %d", *newSeq.MinValue))
+		}
+		if newSeq.MaxValue == nil && oldSeq.MaxValue != nil {
+			parts = append(parts, "NO MAXVALUE")
+		} else if newSeq.MaxValue != nil && (oldSeq.MaxValue == nil || *newSeq.MaxValue != *oldSeq.MaxValue) {
+			parts = append(parts, fmt.Sprintf("MAXVALUE %d", *newSeq.MaxValue))
+		}
+		if newSeq.Cache > 0 && newSeq.Cache != oldSeq.Cache {
+			parts = append(parts, fmt.Sprintf("CACHE %d", newSeq.Cache))
+		}
+		if newSeq.Cycle != oldSeq.Cycle {
+			if newSeq.Cycle {
+				parts = append(parts, "CYCLE")
+			} else {
+				parts = append(parts, "NO CYCLE")
+			}
+		}
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("ALTER SEQUENCE %s %s;", ident, strings.Join(parts, " "))
+}
+
+// GenerateDropSequenceSQL constructs a DROP SEQUENCE IF EXISTS statement.
+// IF EXISTS prevents errors if a table drop previously cascaded and dropped an owned sequence.
+func GenerateDropSequenceSQL(targetSchema, seqName string) string {
+	return fmt.Sprintf("DROP SEQUENCE IF EXISTS %s;", qualifySequence(targetSchema, seqName))
+}
+
 // GenerateCreateTriggerSQL returns the canonical CREATE TRIGGER statement
 // produced by pg_get_triggerdef (schema-qualified table references already
 // unmapped by the diff stage).
@@ -806,6 +926,16 @@ func RenderChangeWithOpts(targetSchema string, c diff.Change, opts RenderOpts) p
 		step.SQL = GenerateAlterCompositeTypeSQL(effectiveSchema, c.Table, c.CompositeAttr, c.Destructive, c.TypeChanged)
 	case plan.ChangeDropCompositeType:
 		step.SQL = GenerateDropTypeSQL(effectiveSchema, c.Table)
+	case plan.ChangeCreateSequence:
+		step.SQL = GenerateCreateSequenceSQL(effectiveSchema, c.Sequence)
+		step.Sequence = c.Sequence
+	case plan.ChangeAlterSequence:
+		step.SQL = GenerateAlterSequenceSQL(effectiveSchema, c.Table, c.OldSequence, c.Sequence)
+		step.Sequence = c.Sequence
+		step.OldSequence = c.OldSequence
+	case plan.ChangeDropSequence:
+		step.SQL = GenerateDropSequenceSQL(effectiveSchema, c.Table)
+		step.Sequence = c.Sequence
 	case plan.ChangeCreateTable:
 		step.SQL = GenerateCreateTableSQL(effectiveSchema, c.TableData)
 		if c.TableData != nil {

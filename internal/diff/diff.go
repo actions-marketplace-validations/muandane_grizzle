@@ -36,6 +36,8 @@ type Change struct {
 	RangeType         *schema.RangeType
 	CompositeType     *schema.CompositeType
 	CompositeAttr     *schema.CompositeAttribute
+	Sequence          *schema.Sequence
+	OldSequence       *schema.Sequence
 	Role              *schema.Role
 	Grant             *schema.Grant
 	Publication       *schema.Publication
@@ -90,6 +92,33 @@ func Diff(live, desired *schema.Schema, targetSchema, shadowSchema string, filte
 //
 //nolint:revive // DiffWithMappings is distinct from Diff for multi-schema mapping context
 func DiffWithMappings(live, desired *schema.Schema, targetSchema, shadowSchema string, filters scope.Filters, schemaMappings map[string]string) ([]Change, error) {
+	if live == nil {
+		live = &schema.Schema{
+			Tables:         make(map[string]*schema.Table),
+			Enums:          make(map[string]*schema.Enum),
+			RangeTypes:     make(map[string]*schema.RangeType),
+			CompositeTypes: make(map[string]*schema.CompositeType),
+			Sequences:      make(map[string]*schema.Sequence),
+			Extensions:     make(map[string]*schema.Extension),
+			Routines:       make(map[string]*schema.Routine),
+			Views:          make(map[string]*schema.View),
+			Unmanaged:      make(map[string]*schema.UnmanagedObject),
+		}
+	}
+	if desired == nil {
+		desired = &schema.Schema{
+			Tables:         make(map[string]*schema.Table),
+			Enums:          make(map[string]*schema.Enum),
+			RangeTypes:     make(map[string]*schema.RangeType),
+			CompositeTypes: make(map[string]*schema.CompositeType),
+			Sequences:      make(map[string]*schema.Sequence),
+			Extensions:     make(map[string]*schema.Extension),
+			Routines:       make(map[string]*schema.Routine),
+			Views:          make(map[string]*schema.View),
+			Unmanaged:      make(map[string]*schema.UnmanagedObject),
+		}
+	}
+
 	var changes []Change
 
 	normalize := func(def string) string {
@@ -126,6 +155,9 @@ func DiffWithMappings(live, desired *schema.Schema, targetSchema, shadowSchema s
 
 	// 1c. Composite Types Diff
 	changes = append(changes, diffCompositeTypes(live, desired, targetSchema)...)
+
+	// 1d. Managed Sequences Diff
+	changes = append(changes, diffSequences(live, desired, targetSchema, filters)...)
 
 	// Validate partition structural rules on desired tables
 	for _, dTable := range desired.Tables {

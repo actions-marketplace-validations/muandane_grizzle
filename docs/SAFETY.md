@@ -149,6 +149,9 @@ Supported hazard codes:
 | `DROP_TRIGGER` | `CRITICAL` | Trigger dropped |
 | `DROP_VIEW` | `CRITICAL` | View or materialized view dropped |
 | `DROP_DOMAIN` | `CRITICAL` | Domain or domain CHECK constraint dropped; dependent columns must be migrated first |
+| `DROP_RANGE_TYPE` | `CRITICAL` | Custom range type dropped; dependent tables and columns lose the type |
+| `DROP_COMPOSITE_TYPE` | `CRITICAL` | Custom composite type dropped; dependent tables and columns lose the type |
+| `DROP_SEQUENCE` | `CRITICAL` | Database sequence dropped; dependent nextval expressions and serial states will fail |
 | `DROP_ENUM_VALUE` | `CRITICAL` | Enum type label will be removed; PostgreSQL does not support in-place enum label deletion without recreating the type and dependent columns |
 | `REVOKE_PRIVILEGE` | `CRITICAL` | Privilege revoked from a grantee (access loss); requires `AllowRevoke` |
 | `DROP_ROLE` | `CRITICAL` | Grizzle-managed role dropped (memberships and grants disappear); requires `AllowDropRole`; refused outright if the role owns cluster objects |
@@ -179,10 +182,10 @@ Supported hazard codes:
 
 ### Invariant 4b: Unmanaged objects policy — detected, protected, not managed
 
-Most schema constructs declared in `SchemaSQL` are managed declaratively (tables, columns, indexes, enums, CHECK/FK constraints, extensions, RLS + policies, COMMENT ON, functions, procedures, aggregates, domains, triggers, views/matviews). Role/grant and cluster-catalog statements (publications, event triggers, subscriptions, logical replication slots) may also live in `SchemaSQL` and are statement-scanned outside shadow compilation; `RolesSQL` and `CatalogSQL` remain authoritative optional overlays. The objects Grizzle deliberately leaves unmanaged are those without a clean shadow-compile or diff story:
+Most schema constructs declared in `SchemaSQL` are managed declaratively (tables, columns, indexes, enums, CHECK/FK constraints, extensions, RLS + policies, COMMENT ON, functions, procedures, aggregates, domains, triggers, views/matviews, sequences). Role/grant and cluster-catalog statements (publications, event triggers, subscriptions, logical replication slots) may also live in `SchemaSQL` and are statement-scanned outside shadow compilation; `RolesSQL` and `CatalogSQL` remain authoritative optional overlays. The objects Grizzle deliberately leaves unmanaged are those without a clean shadow-compile or diff story:
 
 * Physical replication slots (`pg_create_physical_replication_slot`)
-* Standalone sequences not owned by managed tables
+* External sequences not declared in desired schema SQL and not owned by managed tables
 * Window functions (`prokind = 'w'`) and ordered-set/hypothetical aggregates, which fall outside the managed routine surface
 * Extension-owned objects (e.g. types and functions installed by `citext`, `pgcrypto`)
 

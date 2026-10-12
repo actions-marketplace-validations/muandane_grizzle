@@ -71,6 +71,9 @@ const (
 	ChangeCreateCompositeType  ChangeType = "CREATE_COMPOSITE_TYPE"
 	ChangeAlterCompositeType   ChangeType = "ALTER_COMPOSITE_TYPE"
 	ChangeDropCompositeType    ChangeType = "DROP_COMPOSITE_TYPE"
+	ChangeCreateSequence       ChangeType = "CREATE_SEQUENCE"
+	ChangeAlterSequence        ChangeType = "ALTER_SEQUENCE"
+	ChangeDropSequence         ChangeType = "DROP_SEQUENCE"
 	ChangeCreateTrigger        ChangeType = "CREATE_TRIGGER"
 	ChangeDropTrigger          ChangeType = "DROP_TRIGGER"
 	ChangeCreateView           ChangeType = "CREATE_VIEW"
@@ -137,6 +140,10 @@ type Step struct {
 	CompositeType *schema.CompositeType `json:"composite_type,omitzero"`
 	CompositeAttr string                `json:"composite_attr,omitzero"`
 
+	// Sequence metadata
+	Sequence    *schema.Sequence `json:"sequence,omitzero"`
+	OldSequence *schema.Sequence `json:"old_sequence,omitzero"`
+
 	// Relational dependency metadata for multi-schema toposort
 	Schema    string   `json:"schema,omitzero"`
 	DependsOn []string `json:"depends_on,omitzero"`
@@ -181,6 +188,7 @@ type DropPolicy struct {
 	AllowType          bool `json:"allow_type,omitempty"`
 	AllowRangeType     bool `json:"allow_range_type"`
 	AllowCompositeType bool `json:"allow_composite_type"`
+	AllowDropSequence  bool `json:"allow_drop_sequence"`
 	AllowRevoke        bool `json:"allow_revoke"`
 	AllowDropRole      bool `json:"allow_drop_role"`
 	// CatalogSQL surface gates.
@@ -239,6 +247,8 @@ func (p DropPolicy) IsAllowed(s Step) bool {
 			return p.AllowType || p.AllowCompositeType
 		}
 		return true
+	case ChangeDropSequence:
+		return p.AllowDropSequence
 	case ChangeRevoke:
 		return p.AllowRevoke
 	case ChangeDropRole:
@@ -405,7 +415,7 @@ func (p *Plan) Additions() int {
 			ChangeCreateExtension, ChangeCreatePolicy, ChangeCreateFunction, ChangeCreateAggregate, ChangeCreateTrigger, ChangeCreateView,
 			ChangeEnableRLS, ChangeForceRLS, ChangeCreateDomain, ChangeCreateRole, ChangeGrant,
 			ChangeCreatePublication, ChangeCreateSubscription, ChangeCreateReplicationSlot, ChangeCreateEventTrigger,
-			ChangeCreateRangeType, ChangeCreateCompositeType:
+			ChangeCreateRangeType, ChangeCreateCompositeType, ChangeCreateSequence:
 			count++
 		}
 	}
@@ -420,7 +430,7 @@ func (p *Plan) Modifications() int {
 		case ChangeAlterColumn, ChangeAlterEnum, ChangeAlterPolicy, ChangeRefreshMatView,
 			ChangeDisableRLS, ChangeNoForceRLS, ChangeAlterDomain, ChangeRevoke,
 			ChangeAlterRole, ChangeAlterPublication, ChangeAlterSubscription, ChangeAlterEventTrigger,
-			ChangeRenameEnumValue, ChangeAlterCompositeType:
+			ChangeRenameEnumValue, ChangeAlterCompositeType, ChangeAlterSequence:
 			count++
 		}
 	}
@@ -436,7 +446,7 @@ func (p *Plan) Deletions() int {
 			ChangeDropExtension, ChangeDropPolicy, ChangeDropFunction, ChangeDropAggregate, ChangeDropTrigger, ChangeDropView,
 			ChangeDropDomain, ChangeDropDomainConstraint, ChangeDropDomainRetype, ChangeDropRole,
 			ChangeDropPublication, ChangeDropSubscription, ChangeDropReplicationSlot, ChangeDropEventTrigger,
-			ChangeDropEnumValue, ChangeDropRangeType, ChangeDropCompositeType:
+			ChangeDropEnumValue, ChangeDropRangeType, ChangeDropCompositeType, ChangeDropSequence:
 			count++
 		}
 	}
@@ -516,6 +526,8 @@ const (
 	HazardDropRangeType HazardCode = "DROP_RANGE_TYPE"
 	// HazardDropCompositeType indicates dropping a custom composite type.
 	HazardDropCompositeType HazardCode = "DROP_COMPOSITE_TYPE"
+	// HazardDropSequence indicates dropping a database sequence generator.
+	HazardDropSequence HazardCode = "DROP_SEQUENCE"
 	// HazardRevokePrivilege indicates a privilege is being revoked (access loss).
 	HazardRevokePrivilege HazardCode = "REVOKE_PRIVILEGE"
 	// HazardDropRole indicates dropping a Grizzle-managed role.
@@ -871,6 +883,15 @@ func stepHazards(s Step) []Hazard {
 			Type:        s.Type,
 			Table:       s.Table,
 			Description: fmt.Sprintf("Composite type %q will be dropped; dependent tables and columns may be affected", s.Table),
+			SQL:         s.SQL,
+		})
+	case ChangeDropSequence:
+		hazards = append(hazards, Hazard{
+			Code:        HazardDropSequence,
+			Level:       HazardLevelCritical,
+			Type:        s.Type,
+			Table:       s.Table,
+			Description: fmt.Sprintf("Sequence %q will be dropped; dependent nextval expressions and serial states will fail", s.Table),
 			SQL:         s.SQL,
 		})
 	case ChangeCommentTable, ChangeCommentColumn:

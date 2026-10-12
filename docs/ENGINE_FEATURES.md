@@ -308,3 +308,44 @@ Grizzle implements a dedicated session-level advisory lock architecture that coo
 5. **Session hygiene and connection reset:** Because `*sql.Conn.Close()` returns connections to the `*sql.DB` pool rather than terminating TCP sockets, Grizzle releases advisory locks in reverse order via `SELECT pg_advisory_unlock(...)` and issues session-level resets (`RESET search_path; RESET lock_timeout; RESET statement_timeout;`) inside `defer` handlers.
 6. **Direct plan apply parity:** When executing approved plans via `grizzle.Apply` where `SchemaSQL` is not retained, statements route through `exec.ApplyPostgres` / `exec.ApplySQLite` under dedicated session locks and step grouping (`GroupSteps`), rather than naive uncoordinated transactions.
 7. **Multi-pod mutual exclusion and idempotency:** Under the advisory lock, `applyPostgresOnce` and `ApplySQLite` verify `history.IsApplied(ctx, conn, dialect, schema, planHash)`. If a competing replica has already committed the plan under the lock, subsequent replicas exit gracefully as a no-op instead of failing on duplicate relation creation.
+
+---
+
+## PostgreSQL sequence management
+
+*Status: Implemented*
+
+Grizzle manages PostgreSQL sequences (`CREATE SEQUENCE`, `ALTER SEQUENCE`, `DROP SEQUENCE`) declaratively while protecting external unmanaged sequences and preventing cascading drop collisions.
+
+### Declarative syntax & ownership
+
+Sequences declared in SchemaSQL can be standalone or owned by a table column:
+
+```sql
+-- Standalone sequence:
+CREATE SEQUENCE order_id_seq AS bigint INCREMENT BY 5 CACHE 10;
+
+-- Sequence owned by table column:
+CREATE TABLE orders (
+    id bigint DEFAULT nextval('order_id_seq') PRIMARY KEY,
+    amount numeric
+);
+ALTER SEQUENCE order_id_seq OWNED BY orders.id;
+```
+
+### Execution ordering & topological sorting
+
+1. **Early creation (Priority 6)**: Standalone sequences are created before tables and enums. This guarantees that table columns with `DEFAULT nextval('seq')` or foreign key definitions resolve without relation errors.
+2. **Late ownership attachment (Priority 81)**: Sequence ownership (`ALTER SEQUENCE ... OWNED BY [schema.]table.column`) executes after tables and columns are created.
+3. **Collision-safe drops (Priority 102)**: Sequences dropped from desired schemas execute after tables with `DROP SEQUENCE IF EXISTS`. If dropping an owning table previously cascaded and dropped the sequence, `IF EXISTS` ensures idempotency without failure.
+
+### Default normalization & drift detection
+
+PostgreSQL catalog queries on `pg_sequence` populate default values when omitted from DDL (e.g. `INCREMENT 1`, `CACHE 1`, `MAXVALUE 9223372036854775807` for bigint). Grizzle's diff engine normalizes desired sequence parameters against PostgreSQL catalog defaults, preventing false-positive `ALTER SEQUENCE` diffs.
+
+### Safety & unmanaged protection
+
+* **Internal identity sequence exclusion:** PostgreSQL identity columns (`GENERATED ALWAYS/BY DEFAULT AS IDENTITY`) manage internal sequences with dependency type `deptype = 'i'`. These are excluded from standalone sequence inspection.
+* **External sequence protection:** Live database sequences that are not declared in desired SchemaSQL and not owned by managed tables remain marked as protected unmanaged objects (`UnmanagedSequence`) and are never auto-dropped.
+* **Drop gating:** Dropping any managed sequence generates `HazardDropSequence` (`CRITICAL`) and is gated behind `Options.AllowDropSequence` / `Options.AllowDrop`.
+

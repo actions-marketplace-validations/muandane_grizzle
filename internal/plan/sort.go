@@ -38,6 +38,7 @@ func SortSteps(steps []Step) {
 		ChangeDropFunction:          29, // 2f. Drop functions after dependents
 		ChangeDropExtension:         29, // 2g. Drop extensions last among early drops
 		ChangeCreateExtension:       5,  // 0. Extensions before enums/tables (provides types)
+		ChangeCreateSequence:        6,  // 0b. Standalone sequences before enums and tables
 		ChangeCreateEnum:            30, // 3. Create new enum types before tables use them
 		ChangeCreateCompositeType:   31, // 3a. Create composite types before range types and tables
 		ChangeCreateRangeType:       32, // 3a'. Create range types before tables
@@ -54,6 +55,7 @@ func SortSteps(steps []Step) {
 		ChangeAlterColumn:           60, // 7. Modify column types, nullability, defaults
 		ChangeCreateIndex:           70, // 8. Build new indexes
 		ChangeAddFK:                 80, // 9. Add foreign keys (NOT VALID) now that all tables and columns exist
+		ChangeAlterSequence:         81, // 9a. Set sequence ownership after tables and columns exist
 		ChangeAddCheck:              82, // 9b. Add check constraints (NOT VALID) after all tables and columns exist
 		ChangeDropDomainConstraint:  84, // 9c. Drop domain constraints before replacements are added
 		ChangeValidateConstraint:    85, // 10. Validate foreign keys and check constraints
@@ -72,6 +74,7 @@ func SortSteps(steps []Step) {
 		ChangeDropColumn:            90,  // 11. Drop columns (if allowed)
 		ChangeDropTable:             100, // 12. Drop tables (if allowed)
 		ChangeDropDomain:            101, // 13. Drop domains after dependent tables/columns are gone
+		ChangeDropSequence:          102, // 13b. Drop sequences after dependent tables are gone
 		ChangeCreateRole:            119, // 14. Create roles before grants reference them
 		ChangeAlterRole:             120, // 14a. Role attrs/password/config after create
 		ChangeRoleComment:           121, // 14b. Stamp managed-role markers

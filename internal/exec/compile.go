@@ -39,6 +39,7 @@ func CompileSchemaSQLite(ctx context.Context, schemaSQL string, schemas ...strin
 		Enums:          make(map[string]*schema.Enum),
 		RangeTypes:     make(map[string]*schema.RangeType),
 		CompositeTypes: make(map[string]*schema.CompositeType),
+		Sequences:      make(map[string]*schema.Sequence),
 		Unmanaged:      make(map[string]*schema.UnmanagedObject),
 		Dialect:        "sqlite",
 		SourceSQL:      schemaSQL,
@@ -104,6 +105,10 @@ func CompileSchemaPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConf
 	}
 	for _, c := range s.CompositeTypes {
 		c.Schema = primarySchema
+	}
+	for _, seq := range s.Sequences {
+		seq.Schema = primarySchema
+		delete(s.Unmanaged, "sequence:"+seq.Name)
 	}
 	// Desired extensions come from statement parsing, not the shadow catalog:
 	// best-effort installs roll back with the tx and may have failed on

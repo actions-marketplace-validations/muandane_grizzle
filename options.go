@@ -106,6 +106,7 @@ type Options struct {
 	AllowDropType          *bool
 	AllowDropRangeType     *bool
 	AllowDropCompositeType *bool
+	AllowDropSequence      *bool
 
 	// ExcludeTables defines table names or glob patterns (e.g. "spatial_ref_sys", "asynq_*")
 	// that Grizzle will never manage, alter, or drop.
@@ -637,6 +638,11 @@ func resolveDropPolicy(opts Options) plan.DropPolicy {
 		allowCompositeType = *opts.AllowDropCompositeType
 	}
 
+	allowDropSequence := opts.AllowDrop
+	if opts.AllowDropSequence != nil {
+		allowDropSequence = *opts.AllowDropSequence
+	}
+
 	// Privilege-loss gates follow the same blanket-override rule as every
 	// other drop gate: they can also be set directly on Options so a plan
 	// artifact's recorded policy round-trips through optionsFromPlan.
@@ -663,6 +669,7 @@ func resolveDropPolicy(opts Options) plan.DropPolicy {
 		AllowType:                allowType,
 		AllowRangeType:           allowRangeType,
 		AllowCompositeType:       allowCompositeType,
+		AllowDropSequence:        allowDropSequence,
 		AllowRevoke:              allowRevoke,
 		AllowDropRole:            allowDropRole,
 		AllowDropPublication:     allowDropPublication,

@@ -507,6 +507,7 @@ type Hazard struct {
 | `Domains` | Yes | Managed types diffed from `pg_type` (`typtype='d'`) + `pg_constraint` (`conrelid = 0`); base type/nullability/default drift is DROP+CREATE (no in-place retype); CHECK drift → `ALTER DOMAIN ADD/DROP CONSTRAINT`; drops gated by `AllowDropDomain` + `DROP_DOMAIN` (CRITICAL); no implicit `CASCADE` — dependent columns fail at apply |
 | `Triggers` | Yes | `pg_trigger` + canonical `pg_get_triggerdef`; drift → DROP+CREATE; drops gated by `AllowDropTrigger` + `DROP_TRIGGER` (CRITICAL); surviving managed triggers block dependent column drops via `UNMANAGED_DEPENDENCY` |
 | `Views` & `Materialized Views` | Yes | Canonical `pg_get_viewdef`; append-only column changes replace in place (`CREATE OR REPLACE VIEW`), otherwise DROP+CREATE; matviews always DROP+CREATE plus `REFRESH MATERIALIZED VIEW`; drops gated by `AllowDropView` + `DROP_VIEW` (CRITICAL) |
+| `Sequences` | Yes | Standalone `CREATE SEQUENCE` managed when declared in desired schema SQL; parameter drift (`INCREMENT BY`, `CACHE`, `CYCLE`, `MIN/MAXVALUE`) and ownership drift (`OWNED BY [schema.]table.column` vs `OWNED BY NONE`) diffed and applied; unmanaged external sequences remain protected and are never auto-dropped; drops gated by `AllowDropSequence` + `DROP_SEQUENCE` (CRITICAL) using `DROP SEQUENCE IF EXISTS` |
 | `Roles & Grants` | Yes | Via unified `SchemaSQL` or the `RolesSQL` side-channel overlay (§2.2): managed roles (LOGIN/PASSWORD/config attrs) and object grants diffed against `pg_authid` + `pg_db_role_setting` + ACLs (`aclexplode`); duplicate side-channel identities override SchemaSQL; missing → `GRANT`, surplus → `REVOKE` gated by `AllowRevoke` + `REVOKE_PRIVILEGE` (CRITICAL); marker-stamped roles dropped behind `AllowDropRole` + `DROP_ROLE` (CRITICAL) with ownership refusal; grants to `PUBLIC`/unmanaged grantees never revoked; `GRANT ... TO PUBLIC` emits `GRANT_PUBLIC` (WARNING); password drift emits `PASSWORD_CHANGE` (WARNING); `SUPERUSER`/`REPLICATION`/`BYPASSRLS` refused |
 | `Publications` | Yes | Via unified `SchemaSQL` or the `CatalogSQL` side-channel overlay (§2.2): membership and `publish` flags diffed from `pg_publication` / `pg_publication_rel` / `pg_publication_namespace`; duplicate side-channel names override SchemaSQL; drift → `ALTER PUBLICATION`; drops gated by `AllowDropPublication` + `DROP_PUBLICATION` (CRITICAL), narrow to marker-stamped objects; `FOR ALL TABLES` emits `PUBLICATION_ALL_TABLES` (NOTICE); schema-level publications require PostgreSQL 15+ |
 | `Subscriptions` | Yes | Via unified `SchemaSQL` or `CatalogSQL`: conninfo/enabled/publication-set diffed from `pg_subscription` (current DB); CREATE stamps `COMMENT ON SUBSCRIPTION … 'grizzle-managed'`; DROP keeps remote slot (`DISABLE` + `SET (slot_name = NONE)`); gated by `AllowDropSubscription` + `DROP_SUBSCRIPTION` (CRITICAL); conninfo redacted (`SUBSCRIPTION_CONNINFO` WARNING); unsupported WITH options refused |
@@ -535,7 +536,7 @@ type Hazard struct {
 
 | Construct | Supported | Policy |
 | :--- | :---: | :--- |
-| `Sequences` (unowned) | Protected | Never dropped or managed |
+| `Sequences` (external/unmanaged) | Protected | External sequences not declared in desired schema SQL or owned by managed tables are never auto-dropped |
 | `Window functions` (prokind `w`) | Protected | Never managed; dependency-graphed so drops referencing them stay blocked |
 | Ordered-set / hypothetical aggregates (non-default `aggkind`) | Protected | Outside the reconstructed `CREATE AGGREGATE` surface; never managed |
 
@@ -550,7 +551,7 @@ If `AllowDrop` is false (the default), Grizzle refuses to execute any plan conta
 PostgreSQL migrations acquire advisory locks (`pg_advisory_xact_lock` or session lock for concurrent indexes). Grizzle recomputes the diff post-lock to avoid TOCTOU races.
 
 ### Invariant 3: Hazard gating
-Critical hazards (`DROP_TABLE`, `DROP_COLUMN`, `TYPE_NARROW`, `RENAME_AMBIGUOUS`, `UNMANAGED_DEPENDENCY`, `GENERATED_REWRITE`, `DROP_ROLE`, `REVOKE_PRIVILEGE`, `DROP_PUBLICATION`, `DROP_SUBSCRIPTION`, `DROP_REPLICATION_SLOT`, `DROP_EVENT_TRIGGER`) fail execution unless accepted via `AcceptHazards`.
+Critical hazards (`DROP_TABLE`, `DROP_COLUMN`, `DROP_SEQUENCE`, `DROP_RANGE_TYPE`, `DROP_COMPOSITE_TYPE`, `DROP_ENUM_VALUE`, `TYPE_NARROW`, `RENAME_AMBIGUOUS`, `UNMANAGED_DEPENDENCY`, `GENERATED_REWRITE`, `DROP_ROLE`, `REVOKE_PRIVILEGE`, `DROP_PUBLICATION`, `DROP_SUBSCRIPTION`, `DROP_REPLICATION_SLOT`, `DROP_EVENT_TRIGGER`) fail execution unless accepted via `AcceptHazards`.
 
 ### Invariant 4: Plan/Apply approval hash
 `Plan.Hash()` digests approval-sensitive intent (target schemas, scope, renames, expand/contract, policy, NonConcurrentIndexes, SchemaSQL, RolesSQL, CatalogSQL, ordered steps). `Apply` / `DryRunVerifyPlan` verify against `ExpectedHash`, aborting with `ErrPlanDrift` on mismatch. History is advisory (Model B): DDL commits first; a failed history write returns `ErrHistoryRecord` while leaving schema changes applied.
