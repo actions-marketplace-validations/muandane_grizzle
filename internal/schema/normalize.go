@@ -469,17 +469,25 @@ func NormalizeDefinitionWithMappings(def string, mappings map[string]string, cur
 		}
 	}
 
-	// In head: strip default "USING btree " and redundant column casts
-	head = usingBtreeRegex.ReplaceAllString(head, " ")
-	head = colCastParenRegex.ReplaceAllString(head, "$1")
+	upperDef := strings.ToUpper(strings.TrimSpace(def))
+	isIndex := strings.HasPrefix(upperDef, "CREATE ") && (strings.Contains(upperDef, " INDEX ") || strings.Contains(upperDef, " UNIQUE INDEX "))
+
+	if isIndex {
+		// In index head: strip default "USING btree " and redundant column casts
+		head = usingBtreeRegex.ReplaceAllString(head, " ")
+		head = colCastParenRegex.ReplaceAllString(head, "$1")
+	}
 
 	if hasPred {
-		predCond := strings.TrimSpace(strings.TrimPrefix(pred, " WHERE "))
-		normCond := NormalizeExpression(predCond, mappings, currentSchema...)
-		pred = " WHERE (" + normCond + ")"
-		res = strings.TrimSpace(head) + pred
+		if isIndex {
+			predCond := strings.TrimSpace(strings.TrimPrefix(pred, " WHERE "))
+			normCond := NormalizeExpression(predCond, mappings, currentSchema...)
+			res = strings.TrimSpace(head) + " WHERE (" + normCond + ")"
+		} else {
+			res = head + pred
+		}
 	} else {
-		res = strings.TrimSpace(head)
+		res = head
 	}
 
 	return strings.TrimSpace(res)
