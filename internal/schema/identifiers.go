@@ -8,6 +8,18 @@ func ParseQualifiedIdentifier(identifier string) []string {
 	return splitQualifiedIdentifier(identifier)
 }
 
+// CleanIdentifier extracts the bare identifier name from a potentially qualified
+// or quoted SQL identifier (e.g. public.my_table -> my_table, "my_func" -> my_func,
+// "public"."my_col" -> my_col).
+func CleanIdentifier(raw string) string {
+	raw = strings.TrimSpace(raw)
+	parts := ParseQualifiedIdentifier(raw)
+	if len(parts) > 0 {
+		raw = parts[len(parts)-1]
+	}
+	return strings.Trim(strings.TrimSpace(raw), `"`)
+}
+
 // CanonicalIdentifierPart returns the canonical SQL-token identity for one
 // identifier component: unquoted names are folded to lower case and quoted
 // names retain their decoded case and escaping.

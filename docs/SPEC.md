@@ -524,6 +524,8 @@ type Hazard struct {
 | `FOREIGN KEY` | Yes | Validated with `PRAGMA foreign_key_check` |
 | `CHECK Constraint` | Yes | Named and inline CHECK constraints are parsed from `sqlite_schema.sql`, emitted as table-level `CONSTRAINT` lines on create/rebuild, and diffed: check drift triggers a 12-step table rebuild; removals are destructive and gated by `AllowDropCheck` + `DROP_CHECK` (no `NOT VALID`/`VALIDATE` path on SQLite) |
 | `Generated Columns` | Yes | `STORED` and `VIRTUAL` supported; rebuild preserves generated definitions |
+| `COMMENT ON` | No | Not supported by SQLite engine; comments in SchemaSQL are ignored (no catalog metadata) |
+| `Row-Level Security (RLS)` | No | Not supported by SQLite engine; no native row-level security or policy catalogs |
 
 ### Unmanaged database objects (Detected, Protected, Not Managed)
 

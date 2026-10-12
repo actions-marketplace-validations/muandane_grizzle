@@ -60,7 +60,7 @@ func Lint(s *schema.Schema, rules ...Rule) []Diagnostic {
 	return diags
 }
 
-// DefaultRules returns the built-in rule set (L001..L011).
+// DefaultRules returns the built-in rule set (L001..L013).
 func DefaultRules() []Rule {
 	return []Rule{
 		MissingPrimaryKey{},
@@ -74,6 +74,8 @@ func DefaultRules() []Rule {
 		NoDMLStatements{},
 		TriggerWithoutFunction{},
 		UnversionedExtension{},
+		NonIdempotentSeed{},
+		UnsupportedSQLiteFeature{},
 	}
 }
 

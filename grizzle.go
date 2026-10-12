@@ -837,27 +837,39 @@ func CompileSchema(ctx context.Context, db *sql.DB, opts Options) (*SchemaIR, er
 		}
 		opts.Dialect = d
 	}
+	var s *SchemaIR
 	switch opts.Dialect {
 	case DialectSQLite:
 		schemas := opts.TargetSchemas
 		if len(schemas) == 0 && opts.TargetSchema != "" {
 			schemas = []string{opts.TargetSchema}
 		}
-		return exec.CompileSchemaSQLite(ctx, opts.SchemaSQL, schemas...)
+		var err error
+		s, err = exec.CompileSchemaSQLite(ctx, opts.SchemaSQL, schemas...)
+		if err != nil {
+			return nil, err
+		}
 	case DialectPostgres:
 		if len(opts.TargetSchemas) > 1 {
 			return nil, ErrUnsupportedMultiSchema
 		}
 		targetSchema := cmp.Or(opts.TargetSchema, "public")
 		shadowSchema := cmp.Or(opts.ShadowSchema, "_grizzle_shadow")
-		return exec.CompileSchemaPostgres(ctx, db, exec.PostgresExecConfig{
+		var err error
+		s, err = exec.CompileSchemaPostgres(ctx, db, exec.PostgresExecConfig{
 			TargetSchema: targetSchema,
 			ShadowSchema: shadowSchema,
 			SchemaSQL:    opts.SchemaSQL,
 		})
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("grizzle: unsupported dialect %q", opts.Dialect)
 	}
+	s.Dialect = string(opts.Dialect)
+	s.SeedSQL = opts.SeedSQL
+	return s, nil
 }
 
 // LintSchema runs rules (defaulting to DefaultLintRules) against the compiled
@@ -869,7 +881,7 @@ func LintSchema(s *SchemaIR, rules ...LintRule) []LintDiagnostic {
 	return lint.Lint(s, rules...)
 }
 
-// DefaultLintRules returns the built-in lint rule set (L001..L004).
+// DefaultLintRules returns the built-in lint rule set (L001..L013).
 func DefaultLintRules() []LintRule {
 	return lint.DefaultRules()
 }
@@ -877,6 +889,84 @@ func DefaultLintRules() []LintRule {
 // LintHasErrors reports whether any diagnostic has severity ERROR.
 func LintHasErrors(diags []LintDiagnostic) bool {
 	return lint.HasErrors(diags)
+}
+
+// LintSeed inspects seed SQL statements for idempotency and safety issues
+// (such as bare INSERTs without conflict guards, TRUNCATE, or unconditional DELETE)
+// and returns deterministically sorted diagnostics.
+func LintSeed(seedSQL string) []LintDiagnostic {
+	return lint.LintSeedSQL(seedSQL)
+}
+
+// BuildIdempotentInsert builds a canonical idempotent INSERT statement skeleton
+// with conflict handling for seed data.
+//
+// Formats: INSERT INTO "table" ("col1", "col2") VALUES ... ON CONFLICT ...
+//   - If conflictTarget == "": appends ON CONFLICT DO NOTHING;
+//   - If conflictTarget != "" and len(updateColumns) == 0: appends ON CONFLICT (<conflictTarget>) DO NOTHING;
+//   - If conflictTarget != "" and len(updateColumns) > 0: appends ON CONFLICT (<conflictTarget>) DO UPDATE SET <col> = EXCLUDED.<col>, ...;
+//
+// Standard Idempotent Seed Patterns:
+//
+//  1. Unconditional ignore (blank conflictTarget):
+//     Useful when unique constraints or primary keys should silently prevent duplicates without needing specific target specification.
+//     Example:
+//     BuildIdempotentInsert("roles", []string{"name"}, "")
+//     // Output: INSERT INTO "roles" ("name") VALUES ... ON CONFLICT DO NOTHING;
+//
+//  2. Targeted ignore (conflictTarget specified, no updateColumns):
+//     Ignores conflict on a specific key or unique constraint.
+//     Example:
+//     BuildIdempotentInsert("users", []string{"id", "email"}, "id")
+//     // Output: INSERT INTO "users" ("id", "email") VALUES ... ON CONFLICT (id) DO NOTHING;
+//
+//  3. Upsert / update on conflict (conflictTarget and updateColumns specified):
+//     Updates specified mutable columns from EXCLUDED values on conflict.
+//     Example:
+//     BuildIdempotentInsert("users", []string{"id", "name", "email"}, "id", "name", "email")
+//     // Output: INSERT INTO "users" ("id", "name", "email") VALUES ... ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, email = EXCLUDED.email;
+func BuildIdempotentInsert(table string, columns []string, conflictTarget string, updateColumns ...string) string {
+	var b strings.Builder
+	b.WriteString("INSERT INTO ")
+	b.WriteString(quoteIdent(table))
+
+	if len(columns) > 0 {
+		b.WriteString(" (")
+		for i, col := range columns {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(quoteIdent(col))
+		}
+		b.WriteString(")")
+	}
+
+	b.WriteString(" VALUES ...")
+
+	if conflictTarget == "" {
+		b.WriteString(" ON CONFLICT DO NOTHING;")
+	} else if len(updateColumns) == 0 {
+		fmt.Fprintf(&b, " ON CONFLICT (%s) DO NOTHING;", conflictTarget)
+	} else {
+		fmt.Fprintf(&b, " ON CONFLICT (%s) DO UPDATE SET ", conflictTarget)
+		for i, col := range updateColumns {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "%s = EXCLUDED.%s", col, col)
+		}
+		b.WriteString(";")
+	}
+
+	return b.String()
+}
+
+func quoteIdent(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`) && len(s) >= 2 {
+		return s
+	}
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 // DryRunResult reports the outcome of a live dry-run verification.

@@ -567,18 +567,20 @@ func RenderChangeWithOpts(targetSchema string, c diff.Change, opts RenderOpts) p
 	effectiveSchema := cmp.Or(c.Schema, targetSchema)
 
 	step := plan.Step{
-		Type:               c.Type,
-		Table:              c.Table,
-		Schema:             c.Schema,
-		Destructive:        c.Destructive,
-		ColumnNotNull:      c.ColumnNotNull,
-		ColumnHasDefault:   c.ColumnHasDefault,
-		TypeNarrowed:       c.TypeNarrowed,
-		IsRenameCandidate:  c.IsRenameCandidate,
-		IsGeneratedRewrite: c.GeneratedChanged,
-		UnmanagedDeps:      c.UnmanagedDeps,
-		Replace:            c.Replace,
-		OldComment:         c.OldComment,
+		Type:                c.Type,
+		Table:               c.Table,
+		Schema:              c.Schema,
+		Destructive:         c.Destructive,
+		ColumnNotNull:       c.ColumnNotNull,
+		ColumnHasDefault:    c.ColumnHasDefault,
+		TypeNarrowed:        c.TypeNarrowed,
+		IsRenameCandidate:   c.IsRenameCandidate,
+		IsGeneratedRewrite:  c.GeneratedChanged,
+		UnmanagedDeps:       c.UnmanagedDeps,
+		Replace:             c.Replace,
+		OldComment:          c.OldComment,
+		IsSignatureChange:   c.IsSignatureChange,
+		IsDependencyRebuild: c.IsDependencyRebuild,
 	}
 	if c.Column != nil {
 		step.Column = c.Column.Name

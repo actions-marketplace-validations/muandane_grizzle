@@ -3,6 +3,7 @@ package diff
 import (
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -46,6 +47,10 @@ type Change struct {
 	Destructive       bool
 	IsRenameCandidate bool
 	OldComment        string
+
+	// Routine signature drift and dependency rebuild flags
+	IsSignatureChange   bool
+	IsDependencyRebuild bool
 
 	// Structural flags for hazard analysis
 	ColumnNotNull    bool
@@ -843,6 +848,12 @@ func DiffWithMappings(live, desired *schema.Schema, targetSchema, shadowSchema s
 	// drift, DROP + CREATE otherwise, drop live-only behind AllowDropView.
 	changes = append(changes, diffViews(live, desired, targetSchema, normalize)...)
 
+	// 6. Routine dependent rebuilds: if a routine's signature changes, Postgres
+	// rejects DROP FUNCTION while surviving triggers or views depend on it.
+	// Rebuild surviving dependents: DROP before function drop, CREATE after
+	// function recreate.
+	changes = append(changes, rebuildRoutineDependents(changes, live, desired, targetSchema, normalize)...)
+
 	return changes, nil
 }
 
@@ -1032,11 +1043,12 @@ func diffRoutines(live, desired *schema.Schema, targetSchema string, normalize f
 			lCopy := *lR
 			lCopy.IdentityArgs = normalize(lR.IdentityArgs)
 			changes = append(changes, Change{
-				Type:        routineDropType(lR.Kind),
-				Schema:      targetSchema,
-				Table:       lR.Name,
-				Routine:     &lCopy,
-				Destructive: true,
+				Type:              routineDropType(lR.Kind),
+				Schema:            targetSchema,
+				Table:             lR.Name,
+				Routine:           &lCopy,
+				Destructive:       true,
+				IsSignatureChange: true,
 			})
 			changes = append(changes, Change{
 				Type:        routineCreateType(dR.Kind),
@@ -1053,11 +1065,12 @@ func diffRoutines(live, desired *schema.Schema, targetSchema string, normalize f
 				lCopy := *lR
 				lCopy.IdentityArgs = normalize(lR.IdentityArgs)
 				changes = append(changes, Change{
-					Type:        routineDropType(lR.Kind),
-					Schema:      targetSchema,
-					Table:       lR.Name,
-					Routine:     &lCopy,
-					Destructive: true,
+					Type:              routineDropType(lR.Kind),
+					Schema:            targetSchema,
+					Table:             lR.Name,
+					Routine:           &lCopy,
+					Destructive:       true,
+					IsSignatureChange: true,
 				})
 			}
 			changes = append(changes, Change{
@@ -1074,11 +1087,12 @@ func diffRoutines(live, desired *schema.Schema, targetSchema string, normalize f
 			lCopy := *lR
 			lCopy.IdentityArgs = normalize(lR.IdentityArgs)
 			changes = append(changes, Change{
-				Type:        routineDropType(lR.Kind),
-				Schema:      targetSchema,
-				Table:       lR.Name,
-				Routine:     &lCopy,
-				Destructive: true,
+				Type:              routineDropType(lR.Kind),
+				Schema:            targetSchema,
+				Table:             lR.Name,
+				Routine:           &lCopy,
+				Destructive:       true,
+				IsSignatureChange: hasRoutineNamed(desired, lR.Name),
 			})
 		}
 	}
@@ -1101,6 +1115,152 @@ func routineDropType(kind string) plan.ChangeType {
 		return plan.ChangeDropAggregate
 	}
 	return plan.ChangeDropFunction
+}
+
+// hasRoutineNamed reports whether any routine in s has the given name.
+func hasRoutineNamed(s *schema.Schema, name string) bool {
+	if s == nil {
+		return false
+	}
+	for _, r := range s.Routines {
+		if r != nil && r.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// rebuildRoutineDependents inspects changes for routine signature replacements
+// (ChangeDropFunction / ChangeDropAggregate with IsSignatureChange). Any surviving
+// trigger or view that depends on that routine is emitted with temporary DROP and
+// CREATE steps so the routine can be dropped and recreated safely without
+// PostgreSQL dependent object rejection (2BP01).
+func rebuildRoutineDependents(existingChanges []Change, live, desired *schema.Schema, targetSchema string, normalize func(string) string) []Change {
+	rebuiltRoutines := make(map[string]bool)
+	for _, c := range existingChanges {
+		if (c.Type == plan.ChangeDropFunction || c.Type == plan.ChangeDropAggregate) && c.IsSignatureChange {
+			rebuiltRoutines[c.Table] = true
+		}
+	}
+	if len(rebuiltRoutines) == 0 {
+		return nil
+	}
+
+	routineMatchers := make([]*regexp.Regexp, 0, len(rebuiltRoutines))
+	for rName := range rebuiltRoutines {
+		pattern := `(?i)(?:^|[^a-zA-Z0-9_"])(?:(?:[a-zA-Z0-9_"]+\.)?)"?` + regexp.QuoteMeta(rName) + `"?\s*\(`
+		if re, err := regexp.Compile(pattern); err == nil {
+			routineMatchers = append(routineMatchers, re)
+		}
+	}
+
+	handledTriggers := make(map[string]bool)
+	handledViews := make(map[string]bool)
+	for _, c := range existingChanges {
+		switch c.Type {
+		case plan.ChangeDropTrigger, plan.ChangeCreateTrigger:
+			if c.Trigger != nil {
+				handledTriggers[c.Table+"."+c.Trigger.Name] = true
+			}
+		case plan.ChangeDropView, plan.ChangeCreateView:
+			handledViews[c.Table] = true
+		}
+	}
+
+	var changes []Change
+
+	// 1. Surviving triggers on tables
+	for _, tblName := range slices.Sorted(maps.Keys(desired.Tables)) {
+		dTable := desired.Tables[tblName]
+		lTable := live.Tables[tblName]
+		if dTable == nil || lTable == nil {
+			continue
+		}
+		for _, trg := range sortedTriggers(dTable) {
+			if handledTriggers[tblName+"."+trg.Name] {
+				continue
+			}
+			lTrg, inLive := lTable.Triggers[trg.Name]
+			if !inLive {
+				continue
+			}
+			fnName := schema.ExtractTriggerFunction(trg.Definition)
+			if fnName == "" || !rebuiltRoutines[fnName] {
+				continue
+			}
+			lTrgCopy := *lTrg
+			lTrgCopy.Definition = normalize(lTrg.Definition)
+			changes = append(changes, Change{
+				Type:                plan.ChangeDropTrigger,
+				Schema:              targetSchema,
+				Table:               tblName,
+				Trigger:             &lTrgCopy,
+				Destructive:         true,
+				IsDependencyRebuild: true,
+			})
+			dTrgCopy := *trg
+			dTrgCopy.Definition = normalize(trg.Definition)
+			changes = append(changes, Change{
+				Type:                plan.ChangeCreateTrigger,
+				Schema:              targetSchema,
+				Table:               tblName,
+				Trigger:             &dTrgCopy,
+				Destructive:         false,
+				IsDependencyRebuild: true,
+			})
+			handledTriggers[tblName+"."+trg.Name] = true
+		}
+	}
+
+	// 2. Surviving views
+	for _, vName := range sortedViewNames(desired) {
+		if handledViews[vName] {
+			continue
+		}
+		dView := desired.Views[vName]
+		lView, inLive := live.Views[vName]
+		if dView == nil || !inLive || lView == nil {
+			continue
+		}
+		depends := slices.ContainsFunc(routineMatchers, func(re *regexp.Regexp) bool {
+			return re.MatchString(dView.Definition) || re.MatchString(lView.Definition)
+		})
+		if !depends {
+			continue
+		}
+		lViewCopy := *lView
+		lViewCopy.Definition = normalize(lView.Definition)
+		changes = append(changes, Change{
+			Type:                plan.ChangeDropView,
+			Schema:              targetSchema,
+			Table:               vName,
+			View:                &lViewCopy,
+			Destructive:         true,
+			IsDependencyRebuild: true,
+		})
+		dViewCopy := *dView
+		dViewCopy.Definition = normalize(dView.Definition)
+		changes = append(changes, Change{
+			Type:                plan.ChangeCreateView,
+			Schema:              targetSchema,
+			Table:               vName,
+			View:                &dViewCopy,
+			Destructive:         false,
+			IsDependencyRebuild: true,
+		})
+		if dView.IsMatView {
+			changes = append(changes, Change{
+				Type:        plan.ChangeRefreshMatView,
+				Schema:      targetSchema,
+				Table:       vName,
+				View:        &dViewCopy,
+				Destructive: false,
+			})
+		}
+		handledViews[vName] = true
+	}
+
+	return changes
 }
 
 // diffDomains compares live and desired managed domains. Base type,

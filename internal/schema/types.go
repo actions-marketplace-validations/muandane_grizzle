@@ -16,11 +16,17 @@ type Schema struct {
 	Views      map[string]*View            `json:"views,omitempty"`
 	Unmanaged  map[string]*UnmanagedObject `json:"unmanaged,omitempty"`
 
+	// Dialect indicates the database engine ("postgres" or "sqlite").
+	Dialect string `json:"dialect,omitempty"`
+
 	// SourceSQL is the raw desired SchemaSQL the IR was compiled from. It is
 	// deliberately excluded from JSON serialization and plan hashing (the IR
 	// already hashes canonically); it exists so pure statement-scan lint
 	// rules (e.g. L009) can inspect the original input.
 	SourceSQL string `json:"-"`
+
+	// SeedSQL is the raw desired SeedSQL script, if provided.
+	SeedSQL string `json:"-"`
 }
 
 // Extension represents a PostgreSQL extension (CREATE EXTENSION).
@@ -157,6 +163,29 @@ type Policy struct {
 type Trigger struct {
 	Name       string `json:"name"`
 	Definition string `json:"definition"` // canonical pg_get_triggerdef
+}
+
+// triggerExecRe matches the EXECUTE FUNCTION or EXECUTE PROCEDURE clause of a
+// PostgreSQL trigger definition, capturing the function/procedure identifier
+// before the opening argument parenthesis or statement termination.
+var triggerExecRe = regexp.MustCompile(`(?is)\bEXECUTE\s+(?:FUNCTION|PROCEDURE)\s+([^(;]+?)(?:\s*\(|$)`)
+
+// ExtractTriggerFunction parses the target function name from a canonical
+// pg_get_triggerdef or CREATE TRIGGER definition, stripping any schema qualification
+// and surrounding quotes.
+func ExtractTriggerFunction(def string) string {
+	m := triggerExecRe.FindStringSubmatch(def)
+	if m == nil {
+		return ""
+	}
+	return CleanFunctionName(m[1])
+}
+
+// CleanFunctionName extracts the bare function name from a potentially qualified
+// or quoted SQL identifier (e.g. public.my_func -> my_func, "my_func" -> my_func,
+// "public"."my_func" -> my_func).
+func CleanFunctionName(raw string) string {
+	return CleanIdentifier(raw)
 }
 
 // IsPartitioned returns true if the table is a partitioned table.

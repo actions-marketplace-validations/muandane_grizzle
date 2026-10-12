@@ -3,16 +3,10 @@ package lint
 import (
 	"cmp"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/muandane/grizzle/internal/schema"
 )
-
-// triggerExecRe matches the EXECUTE FUNCTION or EXECUTE PROCEDURE clause of a
-// PostgreSQL trigger definition, capturing the function/procedure identifier
-// before the opening argument parenthesis or statement termination.
-var triggerExecRe = regexp.MustCompile(`(?is)\bEXECUTE\s+(?:FUNCTION|PROCEDURE)\s+([^(;]+?)(?:\s*\(|$)`)
 
 // TriggerWithoutFunction (L010) reports triggers declared on a table whose
 // executed function/procedure is not defined in the desired schema's routines.
@@ -40,7 +34,7 @@ func (TriggerWithoutFunction) Check(s *schema.Schema) []Diagnostic {
 			if trg == nil {
 				continue
 			}
-			target := extractTriggerFunction(trg.Definition)
+			target := schema.ExtractTriggerFunction(trg.Definition)
 			if target == "" {
 				continue
 			}
@@ -58,36 +52,13 @@ func (TriggerWithoutFunction) Check(s *schema.Schema) []Diagnostic {
 	return diags
 }
 
-// extractTriggerFunction parses the target function name from a canonical
-// pg_get_triggerdef or CREATE TRIGGER definition, stripping any schema qualification
-// and surrounding quotes.
-func extractTriggerFunction(def string) string {
-	m := triggerExecRe.FindStringSubmatch(def)
-	if m == nil {
-		return ""
-	}
-	return cleanFunctionName(m[1])
-}
-
-// cleanFunctionName extracts the bare function name from a potentially qualified
-// or quoted SQL identifier (e.g. public.my_func -> my_func, "my_func" -> my_func,
-// "public"."my_func" -> my_func).
-func cleanFunctionName(raw string) string {
-	raw = strings.TrimSpace(raw)
-	parts := schema.ParseQualifiedIdentifier(raw)
-	if len(parts) > 0 {
-		raw = parts[len(parts)-1]
-	}
-	return strings.Trim(strings.TrimSpace(raw), `"`)
-}
-
 // routineExists reports whether s.Routines contains any routine whose name
 // matches target (case-insensitive, ignoring quotes and schema prefix).
 func routineExists(s *schema.Schema, target string) bool {
 	if s == nil || len(s.Routines) == 0 {
 		return false
 	}
-	targetClean := cleanFunctionName(target)
+	targetClean := schema.CleanFunctionName(target)
 	for k, r := range s.Routines {
 		var rName string
 		if r != nil {
@@ -95,7 +66,7 @@ func routineExists(s *schema.Schema, target string) bool {
 		}
 		before, _, _ := strings.Cut(k, "(")
 		rName = cmp.Or(rName, before, k)
-		if strings.EqualFold(cleanFunctionName(rName), targetClean) {
+		if strings.EqualFold(schema.CleanFunctionName(rName), targetClean) {
 			return true
 		}
 	}

@@ -137,6 +137,16 @@ type Step struct {
 	// OldComment carries the previous COMMENT ON value for comment steps so
 	// migration export can restore it on rollback.
 	OldComment string `json:"old_comment,omitzero"`
+
+	// IsSignatureChange marks a DROP_FUNCTION / DROP_AGGREGATE step caused by
+	// routine signature drift (args, return type, kind, language) rather than
+	// a standalone deletion.
+	IsSignatureChange bool `json:"is_signature_change,omitzero"`
+
+	// IsDependencyRebuild marks a temporary DROP step (e.g. for a trigger or view)
+	// that is required to allow recreation of a referenced object (such as a function),
+	// after which the dependent object will be recreated.
+	IsDependencyRebuild bool `json:"is_dependency_rebuild,omitzero"`
 }
 
 // DropPolicy defines fine-grained permissions for destructive operations.
@@ -188,8 +198,14 @@ func (p DropPolicy) IsAllowed(s Step) bool {
 	case ChangeDropPolicy:
 		return p.AllowPolicy
 	case ChangeDropTrigger:
+		if s.IsDependencyRebuild {
+			return p.AllowTrigger || p.AllowFunction
+		}
 		return p.AllowTrigger
 	case ChangeDropView:
+		if s.IsDependencyRebuild {
+			return p.AllowView || p.AllowFunction
+		}
 		return p.AllowView
 	case ChangeDropDomain, ChangeDropDomainConstraint, ChangeDropDomainRetype:
 		// Dropping a domain (or a domain constraint) removes validation and
@@ -721,12 +737,16 @@ func stepHazards(s Step) []Hazard {
 			SQL:         s.SQL,
 		})
 	case ChangeDropFunction, ChangeDropAggregate:
+		desc := fmt.Sprintf("Function/procedure/aggregate %q will be dropped", s.Table)
+		if s.IsSignatureChange {
+			desc = fmt.Sprintf("Function/procedure/aggregate %q will be dropped to replace modified signature (will be recreated)", s.Table)
+		}
 		hazards = append(hazards, Hazard{
 			Code:        HazardDropFunction,
 			Level:       HazardLevelCritical,
 			Type:        s.Type,
 			Table:       s.Table,
-			Description: fmt.Sprintf("Function/procedure/aggregate %q will be dropped", s.Table),
+			Description: desc,
 			SQL:         s.SQL,
 		})
 	case ChangeCreateFunction, ChangeCreateAggregate:
@@ -742,21 +762,33 @@ func stepHazards(s Step) []Hazard {
 			})
 		}
 	case ChangeDropTrigger:
+		desc := fmt.Sprintf("Trigger on table %q will be dropped", s.Table)
+		if s.IsDependencyRebuild {
+			if s.Column != "" {
+				desc = fmt.Sprintf("Trigger %q on table %q will be dropped and recreated to accommodate routine update", s.Column, s.Table)
+			} else {
+				desc = fmt.Sprintf("Trigger on table %q will be dropped and recreated to accommodate routine update", s.Table)
+			}
+		}
 		hazards = append(hazards, Hazard{
 			Code:        HazardDropTrigger,
 			Level:       HazardLevelCritical,
 			Type:        s.Type,
 			Table:       s.Table,
-			Description: fmt.Sprintf("Trigger on table %q will be dropped", s.Table),
+			Description: desc,
 			SQL:         s.SQL,
 		})
 	case ChangeDropView:
+		desc := fmt.Sprintf("View %q will be dropped", s.Table)
+		if s.IsDependencyRebuild {
+			desc = fmt.Sprintf("View %q will be dropped and recreated to accommodate routine update", s.Table)
+		}
 		hazards = append(hazards, Hazard{
 			Code:        HazardDropView,
 			Level:       HazardLevelCritical,
 			Type:        s.Type,
 			Table:       s.Table,
-			Description: fmt.Sprintf("View %q will be dropped", s.Table),
+			Description: desc,
 			SQL:         s.SQL,
 		})
 	case ChangeDropDomain, ChangeDropDomainRetype:

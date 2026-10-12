@@ -28,6 +28,7 @@ func CompileSchemaSQLite(ctx context.Context, schemaSQL string, schemas ...strin
 			return nil, fmt.Errorf("sqlite: shadow schema %q missing after compile", schemas[0])
 		}
 		s.SourceSQL = schemaSQL
+		s.Dialect = "sqlite"
 		return s, nil
 	}
 	// Merge attached schemas into one IR; table keys are schema-qualified to
@@ -37,6 +38,7 @@ func CompileSchemaSQLite(ctx context.Context, schemaSQL string, schemas ...strin
 		Tables:    make(map[string]*schema.Table),
 		Enums:     make(map[string]*schema.Enum),
 		Unmanaged: make(map[string]*schema.UnmanagedObject),
+		Dialect:   "sqlite",
 		SourceSQL: schemaSQL,
 	}
 	for _, sch := range schemas {
@@ -107,5 +109,6 @@ func CompileSchemaPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConf
 	unmapShadowExprs(s, []string{shadowSchema})
 
 	s.SourceSQL = cfg.SchemaSQL
+	s.Dialect = "postgres"
 	return s, nil
 }

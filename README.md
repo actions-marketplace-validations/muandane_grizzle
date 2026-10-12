@@ -121,6 +121,7 @@ grizzle export --plan plan.json --format goose --out ./migrations
 * Tables, columns, foreign keys, CHECK constraints, and generated columns.
 * Automatic 12-step table rebuilds for schema changes SQLite cannot execute in-place via `ALTER TABLE`.
 * Supports both `modernc.org/sqlite` (pure Go) and `mattn/go-sqlite3` (CGo).
+* SQLite does not support `COMMENT ON` or Row-Level Security (`ENABLE ROW LEVEL SECURITY`, `CREATE POLICY`); comments are ignored (no catalog metadata) and RLS is PostgreSQL-only.
 
 ---
 
