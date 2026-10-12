@@ -110,7 +110,7 @@ grizzle export --plan plan.json --format goose --out ./migrations
 
 ### PostgreSQL (14–18)
 
-* Tables, columns, enums, and domains.
+* Tables, columns, enums, domains, custom range types, and composite types.
 * Non-blocking operations: indexes via `CONCURRENTLY`, foreign keys via `NOT VALID` + `VALIDATE CONSTRAINT`.
 * Functions, procedures, triggers, views, materialized views, RLS policies, and extensions.
 * Staged migrations: explicit column renames (`Options.Renames` / `--rename`) and expand/contract (`Options.ExpandContract` / `--expand-contract`, with optional `--backfill`).

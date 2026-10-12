@@ -149,3 +149,78 @@ func TestPlan_FormatInteractiveSummary_UnmanagedRemediation(t *testing.T) {
 		t.Errorf("expected remediation hint under critical hazard, got:\n%s", out)
 	}
 }
+
+func TestPlan_PartitionHazards_Descriptions(t *testing.T) {
+	p := &plan.Plan{
+		TargetSchema: "public",
+		Steps: []plan.Step{
+			{
+				Type:        plan.ChangeAttachPartition,
+				Table:       "orders_2026",
+				ParentTable: "orders",
+				SQL:         `ALTER TABLE orders ATTACH PARTITION orders_2026 FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');`,
+			},
+			{
+				Type:            plan.ChangeDetachPartition,
+				Table:           "orders_2025",
+				ParentTable:     "orders",
+				IsPendingDetach: true,
+				SQL:             `ALTER TABLE orders DETACH PARTITION orders_2025 FINALIZE;`,
+			},
+		},
+	}
+
+	hazards := p.Hazards()
+	if len(hazards) != 2 {
+		t.Fatalf("expected 2 hazards, got %d", len(hazards))
+	}
+
+	expectedAttach := `Attaching existing table "orders_2026" to parent "orders" requires a full table validation scan under ACCESS EXCLUSIVE lock. To avoid prolonged locks on large tables, add and validate an equivalent CHECK constraint before attaching.`
+	if hazards[0].Description != expectedAttach {
+		t.Errorf("unexpected attach hazard description:\ngot:  %s\nwant: %s", hazards[0].Description, expectedAttach)
+	}
+
+	expectedDetach := `Partition "orders_2025" is in an interrupted pending-detach state; planning ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete detachment.`
+	if hazards[1].Description != expectedDetach {
+		t.Errorf("unexpected detach hazard description:\ngot:  %s\nwant: %s", hazards[1].Description, expectedDetach)
+	}
+}
+
+func TestPlan_FormatInteractiveSummary_EnumChanges(t *testing.T) {
+	p := &plan.Plan{
+		TargetSchema: "public",
+		Steps: []plan.Step{
+			{
+				Type:         plan.ChangeRenameEnumValue,
+				Table:        "status",
+				OldEnumValue: "pending",
+				EnumValue:    "in_progress",
+				SQL:          `ALTER TYPE "status" RENAME VALUE 'pending' TO 'in_progress';`,
+			},
+			{
+				Type:         plan.ChangeDropEnumValue,
+				Table:        "status",
+				OldEnumValue: "archived",
+				Destructive:  true,
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := p.FormatInteractiveSummary(&buf); err != nil {
+		t.Fatalf("FormatInteractiveSummary failed: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "  ~ RENAME ENUM VALUE status.pending TO in_progress\n") {
+		t.Errorf("missing rename enum value line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "  ! DROP ENUM VALUE status.archived [DROP_ENUM_VALUE: CRITICAL] [BLOCKED by policy]\n") {
+		t.Errorf("missing drop enum value line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "[DROP_ENUM_VALUE] Enum type \"status\" label \"archived\" will be removed; PostgreSQL does not support in-place enum label deletion without recreating the type and dependent columns\n") {
+		t.Errorf("missing drop enum value hazard description, got:\n%s", out)
+	}
+	if !strings.Contains(out, "remediation: PostgreSQL does not support dropping enum values directly; recreate the enum type or map the value via Options.Renames\n") {
+		t.Errorf("missing drop enum value remediation hint, got:\n%s", out)
+	}
+}

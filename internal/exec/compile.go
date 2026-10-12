@@ -34,12 +34,14 @@ func CompileSchemaSQLite(ctx context.Context, schemaSQL string, schemas ...strin
 	// Merge attached schemas into one IR; table keys are schema-qualified to
 	// avoid collisions across ATTACH databases.
 	merged := &schema.Schema{
-		Name:      schemas[0],
-		Tables:    make(map[string]*schema.Table),
-		Enums:     make(map[string]*schema.Enum),
-		Unmanaged: make(map[string]*schema.UnmanagedObject),
-		Dialect:   "sqlite",
-		SourceSQL: schemaSQL,
+		Name:           schemas[0],
+		Tables:         make(map[string]*schema.Table),
+		Enums:          make(map[string]*schema.Enum),
+		RangeTypes:     make(map[string]*schema.RangeType),
+		CompositeTypes: make(map[string]*schema.CompositeType),
+		Unmanaged:      make(map[string]*schema.UnmanagedObject),
+		Dialect:        "sqlite",
+		SourceSQL:      schemaSQL,
 	}
 	for _, sch := range schemas {
 		s := m[sch]
@@ -96,6 +98,12 @@ func CompileSchemaPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConf
 	s.Name = primarySchema
 	for _, t := range s.Tables {
 		t.Schema = primarySchema
+	}
+	for _, r := range s.RangeTypes {
+		r.Schema = primarySchema
+	}
+	for _, c := range s.CompositeTypes {
+		c.Schema = primarySchema
 	}
 	// Desired extensions come from statement parsing, not the shadow catalog:
 	// best-effort installs roll back with the tx and may have failed on

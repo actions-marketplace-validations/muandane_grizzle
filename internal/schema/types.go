@@ -7,14 +7,16 @@ import (
 
 // Schema represents the parsed relational structure of a database schema.
 type Schema struct {
-	Name       string                      `json:"name"`
-	Tables     map[string]*Table           `json:"tables"`
-	Enums      map[string]*Enum            `json:"enums"`
-	Extensions map[string]*Extension       `json:"extensions,omitempty"`
-	Routines   map[string]*Routine         `json:"routines,omitempty"`
-	Domains    map[string]*Domain          `json:"domains,omitempty"`
-	Views      map[string]*View            `json:"views,omitempty"`
-	Unmanaged  map[string]*UnmanagedObject `json:"unmanaged,omitempty"`
+	Name           string                      `json:"name"`
+	Tables         map[string]*Table           `json:"tables"`
+	Enums          map[string]*Enum            `json:"enums"`
+	Extensions     map[string]*Extension       `json:"extensions,omitempty"`
+	Routines       map[string]*Routine         `json:"routines,omitempty"`
+	Domains        map[string]*Domain          `json:"domains,omitempty"`
+	RangeTypes     map[string]*RangeType       `json:"range_types,omitempty"`
+	CompositeTypes map[string]*CompositeType   `json:"composite_types,omitempty"`
+	Views          map[string]*View            `json:"views,omitempty"`
+	Unmanaged      map[string]*UnmanagedObject `json:"unmanaged,omitempty"`
 
 	// Dialect indicates the database engine ("postgres" or "sqlite").
 	Dialect string `json:"dialect,omitempty"`
@@ -61,6 +63,32 @@ type Domain struct {
 	IsNullable bool               `json:"is_nullable"`
 	Default    string             `json:"default,omitempty"`
 	Checks     []*CheckConstraint `json:"checks,omitempty"`
+}
+
+// RangeType represents a custom PostgreSQL range data type (CREATE TYPE ... AS RANGE).
+type RangeType struct {
+	Schema         string `json:"schema,omitempty"`
+	Name           string `json:"name"`
+	Subtype        string `json:"subtype"`
+	SubtypeOpclass string `json:"subtype_opclass,omitempty"`
+	Collation      string `json:"collation,omitempty"`
+	Canonical      string `json:"canonical,omitempty"`
+	SubtypeDiff    string `json:"subtype_diff,omitempty"`
+	MultirangeName string `json:"multirange_name,omitempty"`
+}
+
+// CompositeType represents a custom PostgreSQL composite data type (CREATE TYPE ... AS (...)).
+type CompositeType struct {
+	Schema     string                `json:"schema,omitempty"`
+	Name       string                `json:"name"`
+	Attributes []*CompositeAttribute `json:"attributes"`
+}
+
+// CompositeAttribute represents an attribute field within a composite type.
+type CompositeAttribute struct {
+	Name      string `json:"name"`
+	DataType  string `json:"type"`
+	Collation string `json:"collation,omitempty"`
 }
 
 // View represents a managed SQL VIEW or MATERIALIZED VIEW.

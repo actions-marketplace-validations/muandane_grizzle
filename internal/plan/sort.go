@@ -32,11 +32,17 @@ func SortSteps(steps []Step) {
 		ChangeDropTrigger:           27, // 2d. Drop triggers before column/table drops or function replaces
 		ChangeDropAggregate:         28, // 2e'. Drop aggregates before their support functions (pg_depend)
 		ChangeDropDomainRetype:      28, // 2e''. Drop rebuilt domains before the replacement CREATE_DOMAIN
+		ChangeDropCompositeType:     28, // 2e'''. Drop composite types before recreating
+		ChangeDropRangeType:         28, // 2e''''. Drop range types before recreating
 		ChangeDropView:              28, // 2e. Drop views before underlying table drops
 		ChangeDropFunction:          29, // 2f. Drop functions after dependents
 		ChangeDropExtension:         29, // 2g. Drop extensions last among early drops
 		ChangeCreateExtension:       5,  // 0. Extensions before enums/tables (provides types)
 		ChangeCreateEnum:            30, // 3. Create new enum types before tables use them
+		ChangeCreateCompositeType:   31, // 3a. Create composite types before range types and tables
+		ChangeCreateRangeType:       32, // 3a'. Create range types before tables
+		ChangeAlterCompositeType:    33, // 3a''. Alter composite types before tables
+		ChangeRenameEnumValue:       34, // 3b. Rename enum values before adding or altering
 		ChangeAlterEnum:             35, // 4. Add new enum values before tables insert/alter
 		ChangeCreateDomain:          36, // 4b. Create domains before tables/columns use them
 		ChangeCreateTable:           40, // 5. Create bare tables (PKs included, FKs deferred; parent tables before partitions)

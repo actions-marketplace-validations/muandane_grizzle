@@ -26,12 +26,16 @@ type Change struct {
 	Enum              *schema.Enum
 	OldEnum           *schema.Enum
 	EnumValue         string
+	OldEnumValue      string
 	TableData         *schema.Table
 	Extension         *schema.Extension
 	Policy            *schema.Policy
 	Routine           *schema.Routine
 	Domain            *schema.Domain
 	OldDomain         *schema.Domain
+	RangeType         *schema.RangeType
+	CompositeType     *schema.CompositeType
+	CompositeAttr     *schema.CompositeAttribute
 	Role              *schema.Role
 	Grant             *schema.Grant
 	Publication       *schema.Publication
@@ -115,35 +119,13 @@ func DiffWithMappings(live, desired *schema.Schema, targetSchema, shadowSchema s
 	}
 
 	// 1. Custom ENUM Types Diff
-	dEnumNames := slices.Collect(maps.Keys(desired.Enums))
-	slices.Sort(dEnumNames)
-	for _, dName := range dEnumNames {
-		dEnum := desired.Enums[dName]
-		lEnum, exists := live.Enums[dName]
-		if !exists {
-			changes = append(changes, Change{
-				Type:        plan.ChangeCreateEnum,
-				Schema:      targetSchema,
-				Table:       dName,
-				Enum:        dEnum,
-				Destructive: false,
-			})
-		} else {
-			for _, val := range dEnum.Values {
-				if !slices.Contains(lEnum.Values, val) {
-					changes = append(changes, Change{
-						Type:        plan.ChangeAlterEnum,
-						Schema:      targetSchema,
-						Table:       dName,
-						Enum:        dEnum,
-						OldEnum:     lEnum,
-						EnumValue:   val,
-						Destructive: false,
-					})
-				}
-			}
-		}
-	}
+	changes = append(changes, diffEnums(live, desired, targetSchema, filters)...)
+
+	// 1b. Range Types Diff
+	changes = append(changes, diffRangeTypes(live, desired, targetSchema)...)
+
+	// 1c. Composite Types Diff
+	changes = append(changes, diffCompositeTypes(live, desired, targetSchema)...)
 
 	// Validate partition structural rules on desired tables
 	for _, dTable := range desired.Tables {
@@ -1706,4 +1688,229 @@ func hasDefaultPartition(parentTable string, s *schema.Schema) bool {
 		}
 	}
 	return false
+}
+
+func diffEnums(live, desired *schema.Schema, targetSchema string, filters scope.Filters) []Change {
+	var changes []Change
+	dEnumNames := slices.Collect(maps.Keys(desired.Enums))
+	slices.Sort(dEnumNames)
+	for _, dName := range dEnumNames {
+		dEnum := desired.Enums[dName]
+		lEnum, exists := live.Enums[dName]
+		if !exists {
+			changes = append(changes, Change{
+				Type:        plan.ChangeCreateEnum,
+				Schema:      targetSchema,
+				Table:       dName,
+				Enum:        dEnum,
+				Destructive: false,
+			})
+			continue
+		}
+
+		renamedOld := make(map[string]bool)
+		renamedNew := make(map[string]bool)
+
+		for _, lVal := range lEnum.Values {
+			var newMappedVal string
+			if target, ok := filters.Renames[fmt.Sprintf("%s.%s", dName, lVal)]; ok {
+				newMappedVal = target
+			} else if target, ok := filters.Renames[fmt.Sprintf("enum.%s.%s", dName, lVal)]; ok {
+				newMappedVal = target
+			}
+
+			if newMappedVal != "" {
+				renamedOld[lVal] = true
+				renamedNew[newMappedVal] = true
+				changes = append(changes, Change{
+					Type:         plan.ChangeRenameEnumValue,
+					Schema:       targetSchema,
+					Table:        dName,
+					OldEnumValue: lVal,
+					EnumValue:    newMappedVal,
+					Destructive:  false,
+				})
+			} else if !slices.Contains(dEnum.Values, lVal) {
+				changes = append(changes, Change{
+					Type:         plan.ChangeDropEnumValue,
+					Schema:       targetSchema,
+					Table:        dName,
+					OldEnumValue: lVal,
+					Destructive:  true,
+				})
+			}
+		}
+
+		for _, val := range dEnum.Values {
+			if !slices.Contains(lEnum.Values, val) && !renamedNew[val] {
+				changes = append(changes, Change{
+					Type:        plan.ChangeAlterEnum,
+					Schema:      targetSchema,
+					Table:       dName,
+					Enum:        dEnum,
+					OldEnum:     lEnum,
+					EnumValue:   val,
+					Destructive: false,
+				})
+			}
+		}
+	}
+	return changes
+}
+
+func diffRangeTypes(live, desired *schema.Schema, targetSchema string) []Change {
+	var changes []Change
+	var dNames []string
+	if desired != nil && len(desired.RangeTypes) > 0 {
+		dNames = slices.Sorted(maps.Keys(desired.RangeTypes))
+	}
+	for _, name := range dNames {
+		dRange := desired.RangeTypes[name]
+		var lRange *schema.RangeType
+		if live != nil && live.RangeTypes != nil {
+			lRange = live.RangeTypes[name]
+		}
+		if lRange == nil {
+			changes = append(changes, Change{
+				Type:        plan.ChangeCreateRangeType,
+				Schema:      targetSchema,
+				Table:       name,
+				RangeType:   dRange,
+				Destructive: false,
+			})
+			continue
+		}
+
+		if schema.NormalizeType(lRange.Subtype) != schema.NormalizeType(dRange.Subtype) {
+			changes = append(changes, Change{
+				Type:        plan.ChangeDropRangeType,
+				Schema:      targetSchema,
+				Table:       name,
+				RangeType:   lRange,
+				Destructive: true,
+			})
+			changes = append(changes, Change{
+				Type:        plan.ChangeCreateRangeType,
+				Schema:      targetSchema,
+				Table:       name,
+				RangeType:   dRange,
+				Destructive: false,
+			})
+		}
+	}
+
+	var lNames []string
+	if live != nil && len(live.RangeTypes) > 0 {
+		lNames = slices.Sorted(maps.Keys(live.RangeTypes))
+	}
+	for _, name := range lNames {
+		if desired == nil || desired.RangeTypes == nil || desired.RangeTypes[name] == nil {
+			changes = append(changes, Change{
+				Type:        plan.ChangeDropRangeType,
+				Schema:      targetSchema,
+				Table:       name,
+				RangeType:   live.RangeTypes[name],
+				Destructive: true,
+			})
+		}
+	}
+
+	return changes
+}
+
+func diffCompositeTypes(live, desired *schema.Schema, targetSchema string) []Change {
+	var changes []Change
+	var dNames []string
+	if desired != nil && len(desired.CompositeTypes) > 0 {
+		dNames = slices.Sorted(maps.Keys(desired.CompositeTypes))
+	}
+	for _, name := range dNames {
+		dComp := desired.CompositeTypes[name]
+		var lComp *schema.CompositeType
+		if live != nil && live.CompositeTypes != nil {
+			lComp = live.CompositeTypes[name]
+		}
+		if lComp == nil {
+			changes = append(changes, Change{
+				Type:          plan.ChangeCreateCompositeType,
+				Schema:        targetSchema,
+				Table:         name,
+				CompositeType: dComp,
+				Destructive:   false,
+			})
+			continue
+		}
+
+		lAttrMap := make(map[string]*schema.CompositeAttribute, len(lComp.Attributes))
+		for _, a := range lComp.Attributes {
+			lAttrMap[a.Name] = a
+		}
+		dAttrMap := make(map[string]*schema.CompositeAttribute, len(dComp.Attributes))
+		for _, a := range dComp.Attributes {
+			dAttrMap[a.Name] = a
+		}
+
+		// 1. Removed attribute from desired -> ALTER TYPE ... DROP ATTRIBUTE (destructive: true)
+		for _, lAttr := range lComp.Attributes {
+			if _, inDesired := dAttrMap[lAttr.Name]; !inDesired {
+				changes = append(changes, Change{
+					Type:          plan.ChangeAlterCompositeType,
+					Schema:        targetSchema,
+					Table:         name,
+					CompositeType: dComp,
+					CompositeAttr: lAttr,
+					Destructive:   true,
+				})
+			}
+		}
+
+		// 2. New attribute in desired -> ALTER TYPE ... ADD ATTRIBUTE (destructive: false)
+		for _, dAttr := range dComp.Attributes {
+			if _, inLive := lAttrMap[dAttr.Name]; !inLive {
+				changes = append(changes, Change{
+					Type:          plan.ChangeAlterCompositeType,
+					Schema:        targetSchema,
+					Table:         name,
+					CompositeType: dComp,
+					CompositeAttr: dAttr,
+					Destructive:   false,
+				})
+			}
+		}
+
+		// 3. Changed attribute type -> ALTER TYPE ... ALTER ATTRIBUTE ... TYPE ...
+		for _, dAttr := range dComp.Attributes {
+			if lAttr, inLive := lAttrMap[dAttr.Name]; inLive {
+				if schema.NormalizeType(lAttr.DataType) != schema.NormalizeType(dAttr.DataType) {
+					changes = append(changes, Change{
+						Type:          plan.ChangeAlterCompositeType,
+						Schema:        targetSchema,
+						Table:         name,
+						CompositeType: dComp,
+						CompositeAttr: dAttr,
+						TypeChanged:   true,
+						Destructive:   false,
+					})
+				}
+			}
+		}
+	}
+
+	var lNames []string
+	if live != nil && len(live.CompositeTypes) > 0 {
+		lNames = slices.Sorted(maps.Keys(live.CompositeTypes))
+	}
+	for _, name := range lNames {
+		if desired == nil || desired.CompositeTypes == nil || desired.CompositeTypes[name] == nil {
+			changes = append(changes, Change{
+				Type:          plan.ChangeDropCompositeType,
+				Schema:        targetSchema,
+				Table:         name,
+				CompositeType: live.CompositeTypes[name],
+				Destructive:   true,
+			})
+		}
+	}
+
+	return changes
 }

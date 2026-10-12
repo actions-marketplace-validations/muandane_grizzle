@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/muandane/grizzle/internal/dialect/postgres"
+	"github.com/muandane/grizzle/internal/diff"
+	"github.com/muandane/grizzle/internal/plan"
 	"github.com/muandane/grizzle/internal/schema"
 )
 
@@ -71,5 +73,24 @@ func TestGenerateAlterPolicySQL(t *testing.T) {
 				t.Errorf("GenerateAlterPolicySQL() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestRenderChange_RenameEnumValue(t *testing.T) {
+	c := diff.Change{
+		Type:         plan.ChangeRenameEnumValue,
+		Schema:       "public",
+		Table:        "status",
+		OldEnumValue: "pending",
+		EnumValue:    "in_progress",
+	}
+
+	step := postgres.RenderChange("public", c)
+	expectedSQL := `ALTER TYPE "status" RENAME VALUE 'pending' TO 'in_progress';`
+	if step.SQL != expectedSQL {
+		t.Errorf("step.SQL = %q, want %q", step.SQL, expectedSQL)
+	}
+	if step.OldEnumValue != "pending" || step.EnumValue != "in_progress" {
+		t.Errorf("step OldEnumValue/EnumValue mismatch: old=%q new=%q", step.OldEnumValue, step.EnumValue)
 	}
 }

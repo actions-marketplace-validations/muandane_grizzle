@@ -92,17 +92,20 @@ type Options struct {
 	AllowDropReplicationSlot bool
 
 	// Granular drop overrides (nil inherits from AllowDrop):
-	AllowDropTable     *bool
-	AllowDropColumn    *bool
-	AllowDropIndex     *bool
-	AllowDropFK        *bool
-	AllowDropCheck     *bool
-	AllowDropExtension *bool
-	AllowDropFunction  *bool
-	AllowDropPolicy    *bool
-	AllowDropTrigger   *bool
-	AllowDropView      *bool
-	AllowDropDomain    *bool
+	AllowDropTable         *bool
+	AllowDropColumn        *bool
+	AllowDropIndex         *bool
+	AllowDropFK            *bool
+	AllowDropCheck         *bool
+	AllowDropExtension     *bool
+	AllowDropFunction      *bool
+	AllowDropPolicy        *bool
+	AllowDropTrigger       *bool
+	AllowDropView          *bool
+	AllowDropDomain        *bool
+	AllowDropType          *bool
+	AllowDropRangeType     *bool
+	AllowDropCompositeType *bool
 
 	// ExcludeTables defines table names or glob patterns (e.g. "spatial_ref_sys", "asynq_*")
 	// that Grizzle will never manage, alter, or drop.
@@ -619,6 +622,21 @@ func resolveDropPolicy(opts Options) plan.DropPolicy {
 		allowDomain = *opts.AllowDropDomain
 	}
 
+	allowType := opts.AllowDrop
+	if opts.AllowDropType != nil {
+		allowType = *opts.AllowDropType
+	}
+
+	allowRangeType := opts.AllowDrop || allowType
+	if opts.AllowDropRangeType != nil {
+		allowRangeType = *opts.AllowDropRangeType
+	}
+
+	allowCompositeType := opts.AllowDrop || allowType
+	if opts.AllowDropCompositeType != nil {
+		allowCompositeType = *opts.AllowDropCompositeType
+	}
+
 	// Privilege-loss gates follow the same blanket-override rule as every
 	// other drop gate: they can also be set directly on Options so a plan
 	// artifact's recorded policy round-trips through optionsFromPlan.
@@ -642,6 +660,9 @@ func resolveDropPolicy(opts Options) plan.DropPolicy {
 		AllowTrigger:             allowTrigger,
 		AllowView:                allowView,
 		AllowDomain:              allowDomain,
+		AllowType:                allowType,
+		AllowRangeType:           allowRangeType,
+		AllowCompositeType:       allowCompositeType,
 		AllowRevoke:              allowRevoke,
 		AllowDropRole:            allowDropRole,
 		AllowDropPublication:     allowDropPublication,

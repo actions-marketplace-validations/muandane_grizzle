@@ -19,6 +19,8 @@ type ChangeType string
 const (
 	ChangeCreateEnum         ChangeType = "CREATE_ENUM"
 	ChangeAlterEnum          ChangeType = "ALTER_ENUM"
+	ChangeRenameEnumValue    ChangeType = "RENAME_ENUM_VALUE"
+	ChangeDropEnumValue      ChangeType = "DROP_ENUM_VALUE"
 	ChangeCreateTable        ChangeType = "CREATE_TABLE"
 	ChangeDropTable          ChangeType = "DROP_TABLE"
 	ChangeAddColumn          ChangeType = "ADD_COLUMN"
@@ -64,6 +66,11 @@ const (
 	ChangeDropDomainConstraint ChangeType = "DROP_DOMAIN_CONSTRAINT"
 	ChangeDropDomain           ChangeType = "DROP_DOMAIN"
 	ChangeDropDomainRetype     ChangeType = "DROP_DOMAIN_RETYPE"
+	ChangeCreateRangeType      ChangeType = "CREATE_RANGE_TYPE"
+	ChangeDropRangeType        ChangeType = "DROP_RANGE_TYPE"
+	ChangeCreateCompositeType  ChangeType = "CREATE_COMPOSITE_TYPE"
+	ChangeAlterCompositeType   ChangeType = "ALTER_COMPOSITE_TYPE"
+	ChangeDropCompositeType    ChangeType = "DROP_COMPOSITE_TYPE"
 	ChangeCreateTrigger        ChangeType = "CREATE_TRIGGER"
 	ChangeDropTrigger          ChangeType = "DROP_TRIGGER"
 	ChangeCreateView           ChangeType = "CREATE_VIEW"
@@ -121,6 +128,15 @@ type Step struct {
 	PartitionBounds string `json:"partition_bounds,omitzero"`
 	IsPendingDetach bool   `json:"is_pending_detach,omitzero"`
 
+	// Enum metadata
+	OldEnumValue string `json:"old_enum_value,omitzero"`
+	EnumValue    string `json:"enum_value,omitzero"`
+
+	// Custom type metadata
+	RangeType     *schema.RangeType     `json:"range_type,omitzero"`
+	CompositeType *schema.CompositeType `json:"composite_type,omitzero"`
+	CompositeAttr string                `json:"composite_attr,omitzero"`
+
 	// Relational dependency metadata for multi-schema toposort
 	Schema    string   `json:"schema,omitzero"`
 	DependsOn []string `json:"depends_on,omitzero"`
@@ -151,19 +167,22 @@ type Step struct {
 
 // DropPolicy defines fine-grained permissions for destructive operations.
 type DropPolicy struct {
-	AllowTable     bool `json:"allow_table"`
-	AllowColumn    bool `json:"allow_column"`
-	AllowIndex     bool `json:"allow_index"`
-	AllowFK        bool `json:"allow_fk"`
-	AllowCheck     bool `json:"allow_check"`
-	AllowExtension bool `json:"allow_extension"`
-	AllowFunction  bool `json:"allow_function"`
-	AllowPolicy    bool `json:"allow_policy"`
-	AllowTrigger   bool `json:"allow_trigger"`
-	AllowView      bool `json:"allow_view"`
-	AllowDomain    bool `json:"allow_domain"`
-	AllowRevoke    bool `json:"allow_revoke"`
-	AllowDropRole  bool `json:"allow_drop_role"`
+	AllowTable         bool `json:"allow_table"`
+	AllowColumn        bool `json:"allow_column"`
+	AllowIndex         bool `json:"allow_index"`
+	AllowFK            bool `json:"allow_fk"`
+	AllowCheck         bool `json:"allow_check"`
+	AllowExtension     bool `json:"allow_extension"`
+	AllowFunction      bool `json:"allow_function"`
+	AllowPolicy        bool `json:"allow_policy"`
+	AllowTrigger       bool `json:"allow_trigger"`
+	AllowView          bool `json:"allow_view"`
+	AllowDomain        bool `json:"allow_domain"`
+	AllowType          bool `json:"allow_type,omitempty"`
+	AllowRangeType     bool `json:"allow_range_type"`
+	AllowCompositeType bool `json:"allow_composite_type"`
+	AllowRevoke        bool `json:"allow_revoke"`
+	AllowDropRole      bool `json:"allow_drop_role"`
 	// CatalogSQL surface gates.
 	AllowDropPublication     bool `json:"allow_drop_publication"`
 	AllowDropEventTrigger    bool `json:"allow_drop_event_trigger"`
@@ -211,6 +230,15 @@ func (p DropPolicy) IsAllowed(s Step) bool {
 		// Dropping a domain (or a domain constraint) removes validation and
 		// can strand columns typed by the domain; a single gate covers all.
 		return p.AllowDomain
+	case ChangeDropRangeType:
+		return p.AllowType || p.AllowRangeType
+	case ChangeDropCompositeType:
+		return p.AllowType || p.AllowCompositeType
+	case ChangeAlterCompositeType:
+		if s.Destructive {
+			return p.AllowType || p.AllowCompositeType
+		}
+		return true
 	case ChangeRevoke:
 		return p.AllowRevoke
 	case ChangeDropRole:
@@ -376,7 +404,8 @@ func (p *Plan) Additions() int {
 		case ChangeCreateEnum, ChangeCreateTable, ChangeAddColumn, ChangeCreateIndex, ChangeAddFK, ChangeAddCheck,
 			ChangeCreateExtension, ChangeCreatePolicy, ChangeCreateFunction, ChangeCreateAggregate, ChangeCreateTrigger, ChangeCreateView,
 			ChangeEnableRLS, ChangeForceRLS, ChangeCreateDomain, ChangeCreateRole, ChangeGrant,
-			ChangeCreatePublication, ChangeCreateSubscription, ChangeCreateReplicationSlot, ChangeCreateEventTrigger:
+			ChangeCreatePublication, ChangeCreateSubscription, ChangeCreateReplicationSlot, ChangeCreateEventTrigger,
+			ChangeCreateRangeType, ChangeCreateCompositeType:
 			count++
 		}
 	}
@@ -390,7 +419,8 @@ func (p *Plan) Modifications() int {
 		switch s.Type {
 		case ChangeAlterColumn, ChangeAlterEnum, ChangeAlterPolicy, ChangeRefreshMatView,
 			ChangeDisableRLS, ChangeNoForceRLS, ChangeAlterDomain, ChangeRevoke,
-			ChangeAlterRole, ChangeAlterPublication, ChangeAlterSubscription, ChangeAlterEventTrigger:
+			ChangeAlterRole, ChangeAlterPublication, ChangeAlterSubscription, ChangeAlterEventTrigger,
+			ChangeRenameEnumValue, ChangeAlterCompositeType:
 			count++
 		}
 	}
@@ -405,7 +435,8 @@ func (p *Plan) Deletions() int {
 		case ChangeDropTable, ChangeDropColumn, ChangeDropIndex, ChangeDropFK, ChangeDropCheck,
 			ChangeDropExtension, ChangeDropPolicy, ChangeDropFunction, ChangeDropAggregate, ChangeDropTrigger, ChangeDropView,
 			ChangeDropDomain, ChangeDropDomainConstraint, ChangeDropDomainRetype, ChangeDropRole,
-			ChangeDropPublication, ChangeDropSubscription, ChangeDropReplicationSlot, ChangeDropEventTrigger:
+			ChangeDropPublication, ChangeDropSubscription, ChangeDropReplicationSlot, ChangeDropEventTrigger,
+			ChangeDropEnumValue, ChangeDropRangeType, ChangeDropCompositeType:
 			count++
 		}
 	}
@@ -436,6 +467,8 @@ const (
 	HazardDropTable HazardCode = "DROP_TABLE"
 	// HazardDropColumn indicates a column drop resulting in data loss for row values.
 	HazardDropColumn HazardCode = "DROP_COLUMN"
+	// HazardDropEnumValue indicates removing a label from an enum type.
+	HazardDropEnumValue HazardCode = "DROP_ENUM_VALUE"
 	// HazardTypeNarrow indicates a column type change that narrows capacity or causes data loss/truncation.
 	HazardTypeNarrow HazardCode = "TYPE_NARROW"
 	// HazardNotNullNoDefault indicates adding a NOT NULL column without a default to an existing table.
@@ -479,6 +512,10 @@ const (
 	HazardDropView HazardCode = "DROP_VIEW"
 	// HazardDropDomain indicates dropping a domain or a domain CHECK constraint.
 	HazardDropDomain HazardCode = "DROP_DOMAIN"
+	// HazardDropRangeType indicates dropping a custom range type.
+	HazardDropRangeType HazardCode = "DROP_RANGE_TYPE"
+	// HazardDropCompositeType indicates dropping a custom composite type.
+	HazardDropCompositeType HazardCode = "DROP_COMPOSITE_TYPE"
 	// HazardRevokePrivilege indicates a privilege is being revoked (access loss).
 	HazardRevokePrivilege HazardCode = "REVOKE_PRIVILEGE"
 	// HazardDropRole indicates dropping a Grizzle-managed role.
@@ -576,7 +613,7 @@ func stepHazards(s Step) []Hazard {
 				Level:       HazardLevelWarning,
 				Type:        s.Type,
 				Table:       s.Table,
-				Description: fmt.Sprintf("Partition %q is in an interrupted pending-detach state; finalizing detachment", s.Table),
+				Description: fmt.Sprintf("Partition %q is in an interrupted pending-detach state; planning ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete detachment.", s.Table),
 				SQL:         s.SQL,
 			})
 		}
@@ -586,7 +623,16 @@ func stepHazards(s Step) []Hazard {
 			Level:       HazardLevelWarning,
 			Type:        s.Type,
 			Table:       s.Table,
-			Description: fmt.Sprintf("Attaching existing table %q to parent %q requires a table validation scan under ACCESS EXCLUSIVE lock", s.Table, s.ParentTable),
+			Description: fmt.Sprintf("Attaching existing table %q to parent %q requires a full table validation scan under ACCESS EXCLUSIVE lock. To avoid prolonged locks on large tables, add and validate an equivalent CHECK constraint before attaching.", s.Table, s.ParentTable),
+			SQL:         s.SQL,
+		})
+	case ChangeDropEnumValue:
+		hazards = append(hazards, Hazard{
+			Code:        HazardDropEnumValue,
+			Level:       HazardLevelCritical,
+			Type:        s.Type,
+			Table:       s.Table,
+			Description: fmt.Sprintf("Enum type %q label %q will be removed; PostgreSQL does not support in-place enum label deletion without recreating the type and dependent columns", s.Table, s.OldEnumValue),
 			SQL:         s.SQL,
 		})
 	case ChangeDropTable:
@@ -807,6 +853,24 @@ func stepHazards(s Step) []Hazard {
 			Type:        s.Type,
 			Table:       s.Table,
 			Description: fmt.Sprintf("CHECK constraint on domain %q will be dropped; existing values will no longer be validated", s.Table),
+			SQL:         s.SQL,
+		})
+	case ChangeDropRangeType:
+		hazards = append(hazards, Hazard{
+			Code:        HazardDropRangeType,
+			Level:       HazardLevelCritical,
+			Type:        s.Type,
+			Table:       s.Table,
+			Description: fmt.Sprintf("Range type %q will be dropped; dependent tables and columns may be affected", s.Table),
+			SQL:         s.SQL,
+		})
+	case ChangeDropCompositeType:
+		hazards = append(hazards, Hazard{
+			Code:        HazardDropCompositeType,
+			Level:       HazardLevelCritical,
+			Type:        s.Type,
+			Table:       s.Table,
+			Description: fmt.Sprintf("Composite type %q will be dropped; dependent tables and columns may be affected", s.Table),
 			SQL:         s.SQL,
 		})
 	case ChangeCommentTable, ChangeCommentColumn:

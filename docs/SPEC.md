@@ -415,7 +415,7 @@ func (p *Plan) String() string
 type HazardLevel string
 
 const (
-    HazardLevelCritical HazardLevel = "CRITICAL" // Data destruction (DROP TABLE/COLUMN, DROP_EXTENSION, DROP_POLICY, DROP_FUNCTION, DROP_TRIGGER, DROP_VIEW, DROP_DOMAIN, DROP_ROLE, REVOKE_PRIVILEGE, DROP_PUBLICATION, DROP_SUBSCRIPTION, DROP_REPLICATION_SLOT, DROP_EVENT_TRIGGER, TYPE_NARROW, RENAME_AMBIGUOUS, UNMANAGED_DEPENDENCY, GENERATED_REWRITE)
+    HazardLevelCritical HazardLevel = "CRITICAL" // Data destruction (DROP TABLE/COLUMN, DROP_EXTENSION, DROP_POLICY, DROP_FUNCTION, DROP_TRIGGER, DROP_VIEW, DROP_DOMAIN, DROP_ROLE, REVOKE_PRIVILEGE, DROP_PUBLICATION, DROP_SUBSCRIPTION, DROP_REPLICATION_SLOT, DROP_EVENT_TRIGGER, DROP_ENUM_VALUE, TYPE_NARROW, RENAME_AMBIGUOUS, UNMANAGED_DEPENDENCY, GENERATED_REWRITE)
     HazardLevelWarning  HazardLevel = "WARNING"  // Execution or lockout risk (EXTENSION_PRIVILEGE, GRANT_PUBLIC, EVENT_TRIGGER_SUPERUSER, SUBSCRIPTION_CONNINFO, RLS_ENABLE, SECURITY_DEFINER, PARTITION_ATTACH_SCAN, PARTITION_PENDING_DETACH)
     HazardLevelNotice   HazardLevel = "NOTICE"   // Locking or performance impact (INDEX creation/drop, FK drop, COMMENT_CLEAR, PUBLICATION_ALL_TABLES)
 )
@@ -428,6 +428,7 @@ type HazardCode string
 const (
     HazardDropTable              HazardCode = "DROP_TABLE"
     HazardDropColumn             HazardCode = "DROP_COLUMN"
+    HazardDropEnumValue          HazardCode = "DROP_ENUM_VALUE"
     HazardTypeNarrow             HazardCode = "TYPE_NARROW"
     HazardNotNullNoDefault       HazardCode = "NOT_NULL_NO_DEFAULT"
     HazardIndexBuild             HazardCode = "INDEX_BUILD"
@@ -490,7 +491,10 @@ type Hazard struct {
 | `DROP INDEX` | Yes | Guarded by `AllowDropIndex` and `HazardDropIndex` |
 | `FOREIGN KEY` | Yes | Split into `ADD CONSTRAINT ... NOT VALID` and `VALIDATE CONSTRAINT` |
 | `CHECK Constraint` | Yes | Named and inline `CHECK`; staged `ADD ... NOT VALID` then `VALIDATE CONSTRAINT`; drops guarded by `AllowDropCheck` |
-| `ENUM Types` | Yes | `CREATE TYPE ... AS ENUM`, `ALTER TYPE ... ADD VALUE` |
+| `ENUM Types` | Yes | `CREATE TYPE ... AS ENUM`, `ALTER TYPE ... ADD VALUE`, `ALTER TYPE ... RENAME VALUE`; label drops emit `DROP_ENUM_VALUE` hazard |
+| `Range Types` | Yes | `CREATE TYPE ... AS RANGE (...)`; subtype drift is DROP+CREATE; drops gated by `AllowDropRangeType` / `AllowDropType` + `DROP_RANGE_TYPE` (CRITICAL) |
+| `Composite Types` | Yes | `CREATE TYPE ... AS (...)`; attribute drift emits `ALTER TYPE ... ADD/DROP/ALTER ATTRIBUTE`; drops gated by `AllowDropCompositeType` / `AllowDropType` + `DROP_COMPOSITE_TYPE` (CRITICAL) |
+| `Partitioned Tables` | Yes | Range/list/hash partitioning (`PARTITION BY`); concurrent detach on PG 14+; interrupted detach finalized via `PARTITION_PENDING_DETACH`; standalone table attach emits `PARTITION_ATTACH_SCAN` (operators eliminate lock duration via zero-downtime attach pattern: pre-validate `CHECK` constraint `NOT VALID` then attach) |
 | `Generated Columns` | Yes | `GENERATED ALWAYS AS (...) STORED`; expression rewrite triggers `GENERATED_REWRITE` hazard |
 | `Native Types` | Yes | UUID, JSONB, Arrays, Timestamps, Numerics |
 | `Extensions` | Yes | Declarative `CREATE EXTENSION` (desired captured by statement scan; installs best-effort in the shadow tx so extension-provided types compile). Creates are never dropped by default (`AllowDropExtension`) and marked irreversible in exports. `EXTENSION_PRIVILEGE` (WARNING) on create |

@@ -47,13 +47,15 @@ func unpinSearchPath(ctx context.Context, dbtx dialect.DBTX) {
 // Inspect reads the relational state of the specified schema directly from pg_catalog.
 func Inspect(ctx context.Context, dbtx dialect.DBTX, schemaName string) (*schema.Schema, error) {
 	s := &schema.Schema{
-		Name:       schemaName,
-		Tables:     make(map[string]*schema.Table),
-		Enums:      make(map[string]*schema.Enum),
-		Extensions: make(map[string]*schema.Extension),
-		Routines:   make(map[string]*schema.Routine),
-		Views:      make(map[string]*schema.View),
-		Unmanaged:  make(map[string]*schema.UnmanagedObject),
+		Name:           schemaName,
+		Tables:         make(map[string]*schema.Table),
+		Enums:          make(map[string]*schema.Enum),
+		Extensions:     make(map[string]*schema.Extension),
+		Routines:       make(map[string]*schema.Routine),
+		RangeTypes:     make(map[string]*schema.RangeType),
+		CompositeTypes: make(map[string]*schema.CompositeType),
+		Views:          make(map[string]*schema.View),
+		Unmanaged:      make(map[string]*schema.UnmanagedObject),
 	}
 
 	// 0. Inspect Extensions (database-wide; keyed by lowercased name)
@@ -1165,6 +1167,117 @@ func Inspect(ctx context.Context, dbtx dialect.DBTX, schemaName string) (*schema
 		}
 		_ = dCheckRows.Close()
 	}
+
+	// 6g. Inspect Custom Range Types
+	rangeQuery := `
+		SELECT
+			t.typname AS range_name,
+			format_type(r.rngsubtype, NULL) AS subtype,
+			COALESCE(opc.opcname, '') AS subtype_opclass,
+			COALESCE(c.collname, '') AS collation,
+			COALESCE(p_can.proname, '') AS canonical,
+			COALESCE(p_diff.proname, '') AS subtype_diff,
+			COALESCE(mt.typname, '') AS multirange_name
+		FROM pg_type t
+		JOIN pg_range r ON r.rngtypid = t.oid
+		JOIN pg_namespace n ON n.oid = t.typnamespace
+		LEFT JOIN pg_collation c ON c.oid = r.rngcollation AND r.rngcollation != 0
+		LEFT JOIN pg_opclass opc ON opc.oid = r.rngsubopc AND r.rngsubopc != 0
+		LEFT JOIN pg_type mt ON mt.oid = r.rngmultitypid AND r.rngmultitypid != 0
+		LEFT JOIN pg_proc p_can ON p_can.oid = r.rngcanonical AND r.rngcanonical != 0
+		LEFT JOIN pg_proc p_diff ON p_diff.oid = r.rngsubdiff AND r.rngsubdiff != 0
+		WHERE n.nspname = $1
+		  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = t.oid AND d.deptype = 'e')
+		ORDER BY t.typname;
+	`
+	rangeRows, err := dbtx.QueryContext(ctx, rangeQuery, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("inspecting range types in schema %q: %w", schemaName, err)
+	}
+	defer func() { _ = rangeRows.Close() }()
+
+	for rangeRows.Next() {
+		var name, rawSubtype, opclass, collation, canonical, diffFunc, multirange string
+		if err := rangeRows.Scan(&name, &rawSubtype, &opclass, &collation, &canonical, &diffFunc, &multirange); err != nil {
+			return nil, fmt.Errorf("scanning range type in schema %q: %w", schemaName, err)
+		}
+		if s.RangeTypes == nil {
+			s.RangeTypes = make(map[string]*schema.RangeType)
+		}
+		cleanedSubtype := strings.TrimPrefix(rawSubtype, schemaName+".")
+		cleanedSubtype = strings.TrimPrefix(cleanedSubtype, `"`+schemaName+`".`)
+		if collation == "default" {
+			collation = ""
+		}
+		s.RangeTypes[name] = &schema.RangeType{
+			Schema:         schemaName,
+			Name:           name,
+			Subtype:        schema.NormalizeType(cleanedSubtype),
+			SubtypeOpclass: opclass,
+			Collation:      collation,
+			Canonical:      canonical,
+			SubtypeDiff:    diffFunc,
+			MultirangeName: multirange,
+		}
+	}
+	if err := rangeRows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rangeRows.Close()
+
+	// 6h. Inspect Custom Composite Types
+	compQuery := `
+		SELECT
+			t.typname AS composite_name,
+			a.attname AS attr_name,
+			format_type(a.atttypid, a.atttypmod) AS attr_type,
+			COALESCE(col.collname, '') AS collation
+		FROM pg_type t
+		JOIN pg_class c ON c.oid = t.typrelid AND c.relkind = 'c'
+		JOIN pg_namespace n ON n.oid = t.typnamespace
+		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+		LEFT JOIN pg_collation col ON col.oid = a.attcollation AND a.attcollation != 0
+		WHERE n.nspname = $1
+		  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = t.oid AND d.deptype = 'e')
+		ORDER BY t.typname, a.attnum;
+	`
+	compRows, err := dbtx.QueryContext(ctx, compQuery, schemaName)
+	if err != nil {
+		return nil, fmt.Errorf("inspecting composite types in schema %q: %w", schemaName, err)
+	}
+	defer func() { _ = compRows.Close() }()
+
+	for compRows.Next() {
+		var compName, attrName, rawType, collation string
+		if err := compRows.Scan(&compName, &attrName, &rawType, &collation); err != nil {
+			return nil, fmt.Errorf("scanning composite type attribute in schema %q: %w", schemaName, err)
+		}
+		if s.CompositeTypes == nil {
+			s.CompositeTypes = make(map[string]*schema.CompositeType)
+		}
+		ct, exists := s.CompositeTypes[compName]
+		if !exists {
+			ct = &schema.CompositeType{
+				Schema: schemaName,
+				Name:   compName,
+			}
+			s.CompositeTypes[compName] = ct
+		}
+		cleanedType := strings.TrimPrefix(rawType, schemaName+".")
+		cleanedType = strings.TrimPrefix(cleanedType, `"`+schemaName+`".`)
+		if collation == "default" {
+			collation = ""
+		}
+		ct.Attributes = append(ct.Attributes, &schema.CompositeAttribute{
+			Name:      attrName,
+			DataType:  schema.NormalizeType(cleanedType),
+			Collation: collation,
+		})
+	}
+	if err := compRows.Err(); err != nil {
+		return nil, err
+	}
+	_ = compRows.Close()
 
 	return s, nil
 }

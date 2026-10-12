@@ -73,6 +73,15 @@ type PrimaryKeyIR = schema.PrimaryKey
 // EnumIR represents the intermediate representation of an enum type.
 type EnumIR = schema.Enum
 
+// RangeTypeIR represents the intermediate representation of a range type.
+type RangeTypeIR = schema.RangeType
+
+// CompositeTypeIR represents the intermediate representation of a composite type.
+type CompositeTypeIR = schema.CompositeType
+
+// CompositeAttributeIR represents the intermediate representation of an attribute in a composite type.
+type CompositeAttributeIR = schema.CompositeAttribute
+
 // GeneratedColumn describes a computed or generated column.
 type GeneratedColumn = schema.GeneratedColumn
 
@@ -97,45 +106,53 @@ const (
 
 // ChangeType constants
 const (
-	ChangeCreateEnum         = plan.ChangeCreateEnum
-	ChangeAlterEnum          = plan.ChangeAlterEnum
-	ChangeCreateTable        = plan.ChangeCreateTable
-	ChangeDropTable          = plan.ChangeDropTable
-	ChangeAddColumn          = plan.ChangeAddColumn
-	ChangeDropColumn         = plan.ChangeDropColumn
-	ChangeAlterColumn        = plan.ChangeAlterColumn
-	ChangeCreateIndex        = plan.ChangeCreateIndex
-	ChangeDropIndex          = plan.ChangeDropIndex
-	ChangeAddFK              = plan.ChangeAddFK
-	ChangeDropFK             = plan.ChangeDropFK
-	ChangeAddCheck           = plan.ChangeAddCheck
-	ChangeDropCheck          = plan.ChangeDropCheck
-	ChangeValidateConstraint = plan.ChangeValidateConstraint
-	ChangeRenameColumn       = plan.ChangeRenameColumn
-	ChangeAttachPartition    = plan.ChangeAttachPartition
-	ChangeDetachPartition    = plan.ChangeDetachPartition
-	ChangeCreateExtension    = plan.ChangeCreateExtension
-	ChangeDropExtension      = plan.ChangeDropExtension
-	ChangeEnableRLS          = plan.ChangeEnableRLS
-	ChangeDisableRLS         = plan.ChangeDisableRLS
-	ChangeForceRLS           = plan.ChangeForceRLS
-	ChangeNoForceRLS         = plan.ChangeNoForceRLS
-	ChangeCreatePolicy       = plan.ChangeCreatePolicy
-	ChangeAlterPolicy        = plan.ChangeAlterPolicy
-	ChangeDropPolicy         = plan.ChangeDropPolicy
-	ChangeCreateFunction     = plan.ChangeCreateFunction
-	ChangeDropFunction       = plan.ChangeDropFunction
-	ChangeCreateTrigger      = plan.ChangeCreateTrigger
-	ChangeDropTrigger        = plan.ChangeDropTrigger
-	ChangeCreateView         = plan.ChangeCreateView
-	ChangeDropView           = plan.ChangeDropView
-	ChangeRefreshMatView     = plan.ChangeRefreshMatView
+	ChangeCreateEnum          = plan.ChangeCreateEnum
+	ChangeAlterEnum           = plan.ChangeAlterEnum
+	ChangeRenameEnumValue     = plan.ChangeRenameEnumValue
+	ChangeDropEnumValue       = plan.ChangeDropEnumValue
+	ChangeCreateTable         = plan.ChangeCreateTable
+	ChangeDropTable           = plan.ChangeDropTable
+	ChangeAddColumn           = plan.ChangeAddColumn
+	ChangeDropColumn          = plan.ChangeDropColumn
+	ChangeAlterColumn         = plan.ChangeAlterColumn
+	ChangeCreateIndex         = plan.ChangeCreateIndex
+	ChangeDropIndex           = plan.ChangeDropIndex
+	ChangeAddFK               = plan.ChangeAddFK
+	ChangeDropFK              = plan.ChangeDropFK
+	ChangeAddCheck            = plan.ChangeAddCheck
+	ChangeDropCheck           = plan.ChangeDropCheck
+	ChangeValidateConstraint  = plan.ChangeValidateConstraint
+	ChangeRenameColumn        = plan.ChangeRenameColumn
+	ChangeAttachPartition     = plan.ChangeAttachPartition
+	ChangeDetachPartition     = plan.ChangeDetachPartition
+	ChangeCreateExtension     = plan.ChangeCreateExtension
+	ChangeDropExtension       = plan.ChangeDropExtension
+	ChangeEnableRLS           = plan.ChangeEnableRLS
+	ChangeDisableRLS          = plan.ChangeDisableRLS
+	ChangeForceRLS            = plan.ChangeForceRLS
+	ChangeNoForceRLS          = plan.ChangeNoForceRLS
+	ChangeCreatePolicy        = plan.ChangeCreatePolicy
+	ChangeAlterPolicy         = plan.ChangeAlterPolicy
+	ChangeDropPolicy          = plan.ChangeDropPolicy
+	ChangeCreateFunction      = plan.ChangeCreateFunction
+	ChangeDropFunction        = plan.ChangeDropFunction
+	ChangeCreateTrigger       = plan.ChangeCreateTrigger
+	ChangeDropTrigger         = plan.ChangeDropTrigger
+	ChangeCreateView          = plan.ChangeCreateView
+	ChangeDropView            = plan.ChangeDropView
+	ChangeRefreshMatView      = plan.ChangeRefreshMatView
+	ChangeCreateRangeType     = plan.ChangeCreateRangeType
+	ChangeDropRangeType       = plan.ChangeDropRangeType
+	ChangeCreateCompositeType = plan.ChangeCreateCompositeType
+	ChangeAlterCompositeType  = plan.ChangeAlterCompositeType
+	ChangeDropCompositeType   = plan.ChangeDropCompositeType
 )
 
 // HazardCode constants
 const (
 	HazardDropTable              = plan.HazardDropTable
 	HazardDropColumn             = plan.HazardDropColumn
+	HazardDropEnumValue          = plan.HazardDropEnumValue
 	HazardTypeNarrow             = plan.HazardTypeNarrow
 	HazardNotNullNoDefault       = plan.HazardNotNullNoDefault
 	HazardIndexBuild             = plan.HazardIndexBuild
@@ -157,6 +174,8 @@ const (
 	HazardDropTrigger            = plan.HazardDropTrigger
 	HazardDropView               = plan.HazardDropView
 	HazardDropDomain             = plan.HazardDropDomain
+	HazardDropRangeType          = plan.HazardDropRangeType
+	HazardDropCompositeType      = plan.HazardDropCompositeType
 )
 
 // UnmanagedObject represents an unmanaged database object detected during introspection.
@@ -574,6 +593,8 @@ func optionsFromPlan(p *Plan, opts ApplyOpts) Options {
 		AllowDropTrigger:         &p.Policy.AllowTrigger,
 		AllowDropView:            &p.Policy.AllowView,
 		AllowDropDomain:          &p.Policy.AllowDomain,
+		AllowDropRangeType:       &p.Policy.AllowRangeType,
+		AllowDropCompositeType:   &p.Policy.AllowCompositeType,
 		AllowRevoke:              p.Policy.AllowRevoke,
 		AllowDropRole:            p.Policy.AllowDropRole,
 		AllowDropPublication:     p.Policy.AllowDropPublication,
@@ -682,7 +703,9 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 		// Schema-scoped steps carry non-table names in Table (enum/extension/
 		// function/view names); skip table scope checks for them.
 		switch s.Type {
-		case plan.ChangeCreateEnum, plan.ChangeAlterEnum,
+		case plan.ChangeCreateEnum, plan.ChangeAlterEnum, plan.ChangeRenameEnumValue, plan.ChangeDropEnumValue,
+			plan.ChangeCreateRangeType, plan.ChangeDropRangeType,
+			plan.ChangeCreateCompositeType, plan.ChangeAlterCompositeType, plan.ChangeDropCompositeType,
 			plan.ChangeCreateExtension, plan.ChangeDropExtension,
 			plan.ChangeCreateFunction, plan.ChangeDropFunction,
 			plan.ChangeCreateView, plan.ChangeDropView:

@@ -432,6 +432,97 @@ func GenerateDropDomainSQL(targetSchema, domainName string) string {
 	return fmt.Sprintf("DROP DOMAIN IF EXISTS %q.%q;", targetSchema, domainName)
 }
 
+func qualifyType(targetSchema, typeName string) string {
+	typeName = strings.TrimSpace(typeName)
+	if strings.Contains(typeName, ".") {
+		parts := strings.Split(typeName, ".")
+		for i, p := range parts {
+			parts[i] = fmt.Sprintf("%q", strings.Trim(p, `"`))
+		}
+		return strings.Join(parts, ".")
+	}
+	typeName = strings.Trim(typeName, `"`)
+	if targetSchema == "" {
+		return fmt.Sprintf("%q", typeName)
+	}
+	targetSchema = strings.Trim(targetSchema, `"`)
+	return fmt.Sprintf("%q.%q", targetSchema, typeName)
+}
+
+// GenerateCreateRangeTypeSQL constructs a CREATE TYPE ... AS RANGE statement.
+func GenerateCreateRangeTypeSQL(targetSchema string, r *schema.RangeType) string {
+	if r == nil {
+		return ""
+	}
+	ident := qualifyType(targetSchema, r.Name)
+	var parts []string
+	if r.Subtype != "" {
+		parts = append(parts, fmt.Sprintf("SUBTYPE = %s", r.Subtype))
+	}
+	if r.SubtypeOpclass != "" {
+		parts = append(parts, fmt.Sprintf("SUBTYPE_OPCLASS = %s", r.SubtypeOpclass))
+	}
+	if r.Collation != "" {
+		parts = append(parts, fmt.Sprintf("COLLATION = %s", r.Collation))
+	}
+	if r.Canonical != "" {
+		parts = append(parts, fmt.Sprintf("CANONICAL = %s", r.Canonical))
+	}
+	if r.SubtypeDiff != "" {
+		parts = append(parts, fmt.Sprintf("SUBTYPE_DIFF = %s", r.SubtypeDiff))
+	}
+	if r.MultirangeName != "" {
+		parts = append(parts, fmt.Sprintf("MULTIRANGE_TYPE_NAME = %s", r.MultirangeName))
+	}
+	return fmt.Sprintf("CREATE TYPE %s AS RANGE (%s);", ident, strings.Join(parts, ", "))
+}
+
+// GenerateCreateCompositeTypeSQL constructs a CREATE TYPE ... AS (...) statement.
+func GenerateCreateCompositeTypeSQL(targetSchema string, ct *schema.CompositeType) string {
+	if ct == nil {
+		return ""
+	}
+	ident := qualifyType(targetSchema, ct.Name)
+	var attrs []string
+	for _, a := range ct.Attributes {
+		clause := fmt.Sprintf("%q %s", a.Name, a.DataType)
+		if a.Collation != "" {
+			clause += fmt.Sprintf(" COLLATE %s", a.Collation)
+		}
+		attrs = append(attrs, clause)
+	}
+	return fmt.Sprintf("CREATE TYPE %s AS (%s);", ident, strings.Join(attrs, ", "))
+}
+
+// GenerateAlterCompositeTypeSQL constructs an ALTER TYPE statement for composite type attribute changes.
+func GenerateAlterCompositeTypeSQL(targetSchema, typeName string, attr *schema.CompositeAttribute, destructive, typeChanged bool) string {
+	if attr == nil {
+		return ""
+	}
+	ident := qualifyType(targetSchema, typeName)
+	attrName := quoteIdentifier(attr.Name)
+	if destructive {
+		return fmt.Sprintf("ALTER TYPE %s DROP ATTRIBUTE %s;", ident, attrName)
+	}
+	if typeChanged {
+		clause := attr.DataType
+		if attr.Collation != "" {
+			clause += fmt.Sprintf(" COLLATE %s", attr.Collation)
+		}
+		return fmt.Sprintf("ALTER TYPE %s ALTER ATTRIBUTE %s TYPE %s;", ident, attrName, clause)
+	}
+	clause := fmt.Sprintf("%s %s", attrName, attr.DataType)
+	if attr.Collation != "" {
+		clause += fmt.Sprintf(" COLLATE %s", attr.Collation)
+	}
+	return fmt.Sprintf("ALTER TYPE %s ADD ATTRIBUTE %s;", ident, clause)
+}
+
+// GenerateDropTypeSQL constructs a DROP TYPE statement.
+func GenerateDropTypeSQL(targetSchema, typeName string) string {
+	return fmt.Sprintf("DROP TYPE %s;", qualifyType(targetSchema, typeName))
+}
+
 // GenerateCreateTriggerSQL returns the canonical CREATE TRIGGER statement
 // produced by pg_get_triggerdef (schema-qualified table references already
 // unmapped by the diff stage).
@@ -581,6 +672,13 @@ func RenderChangeWithOpts(targetSchema string, c diff.Change, opts RenderOpts) p
 		OldComment:          c.OldComment,
 		IsSignatureChange:   c.IsSignatureChange,
 		IsDependencyRebuild: c.IsDependencyRebuild,
+		OldEnumValue:        c.OldEnumValue,
+		EnumValue:           c.EnumValue,
+		RangeType:           c.RangeType,
+		CompositeType:       c.CompositeType,
+	}
+	if c.CompositeAttr != nil {
+		step.CompositeAttr = c.CompositeAttr.Name
 	}
 	if c.Column != nil {
 		step.Column = c.Column.Name
@@ -692,6 +790,22 @@ func RenderChangeWithOpts(targetSchema string, c diff.Change, opts RenderOpts) p
 	case plan.ChangeAlterEnum:
 		step.SQL = GenerateAddEnumValueSQL(effectiveSchema, c.Table, c.EnumValue)
 		step.NonTx = true
+	case plan.ChangeRenameEnumValue:
+		step.SQL = fmt.Sprintf("ALTER TYPE %s RENAME VALUE %s TO %s;", quoteIdentifier(c.Table), quoteStringLiteral(c.OldEnumValue), quoteStringLiteral(c.EnumValue))
+		step.OldEnumValue = c.OldEnumValue
+		step.EnumValue = c.EnumValue
+	case plan.ChangeDropEnumValue:
+		step.OldEnumValue = c.OldEnumValue
+	case plan.ChangeCreateRangeType:
+		step.SQL = GenerateCreateRangeTypeSQL(effectiveSchema, c.RangeType)
+	case plan.ChangeDropRangeType:
+		step.SQL = GenerateDropTypeSQL(effectiveSchema, c.Table)
+	case plan.ChangeCreateCompositeType:
+		step.SQL = GenerateCreateCompositeTypeSQL(effectiveSchema, c.CompositeType)
+	case plan.ChangeAlterCompositeType:
+		step.SQL = GenerateAlterCompositeTypeSQL(effectiveSchema, c.Table, c.CompositeAttr, c.Destructive, c.TypeChanged)
+	case plan.ChangeDropCompositeType:
+		step.SQL = GenerateDropTypeSQL(effectiveSchema, c.Table)
 	case plan.ChangeCreateTable:
 		step.SQL = GenerateCreateTableSQL(effectiveSchema, c.TableData)
 		if c.TableData != nil {

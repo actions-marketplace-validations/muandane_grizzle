@@ -43,13 +43,16 @@ func (p *Plan) Format(w io.Writer, useColor bool) error {
 		isBlocked := !p.Policy.IsAllowed(s)
 
 		switch s.Type {
-		case ChangeCreateEnum, ChangeCreateTable, ChangeAddColumn, ChangeCreateIndex, ChangeAddFK, ChangeAddCheck:
+		case ChangeCreateEnum, ChangeCreateTable, ChangeAddColumn, ChangeCreateIndex, ChangeAddFK, ChangeAddCheck,
+			ChangeCreateRangeType, ChangeCreateCompositeType:
 			symbol = "+"
 			color = colorGreen
-		case ChangeAlterColumn, ChangeAlterEnum:
+		case ChangeAlterColumn, ChangeAlterEnum, ChangeRenameEnumValue,
+			ChangeAlterCompositeType:
 			symbol = "~"
 			color = colorYellow
-		case ChangeDropTable, ChangeDropColumn, ChangeDropIndex, ChangeDropFK, ChangeDropCheck:
+		case ChangeDropTable, ChangeDropColumn, ChangeDropIndex, ChangeDropFK, ChangeDropCheck, ChangeDropEnumValue,
+			ChangeDropRangeType, ChangeDropCompositeType:
 			symbol = "-"
 			color = colorRed
 		}
@@ -147,11 +150,14 @@ func (p *Plan) FormatInteractiveSummary(w io.Writer) error {
 			symbol = "!"
 		} else {
 			switch s.Type {
-			case ChangeCreateEnum, ChangeCreateTable, ChangeAddColumn, ChangeCreateIndex, ChangeAddFK, ChangeAddCheck, ChangeAttachPartition:
+			case ChangeCreateEnum, ChangeCreateTable, ChangeAddColumn, ChangeCreateIndex, ChangeAddFK, ChangeAddCheck, ChangeAttachPartition,
+				ChangeCreateRangeType, ChangeCreateCompositeType:
 				symbol = "+"
-			case ChangeAlterColumn, ChangeAlterEnum, ChangeValidateConstraint, ChangeRenameColumn:
+			case ChangeAlterColumn, ChangeAlterEnum, ChangeValidateConstraint, ChangeRenameColumn, ChangeRenameEnumValue,
+				ChangeAlterCompositeType:
 				symbol = "~"
-			case ChangeDropTable, ChangeDropColumn, ChangeDropIndex, ChangeDropFK, ChangeDropCheck, ChangeDetachPartition:
+			case ChangeDropTable, ChangeDropColumn, ChangeDropIndex, ChangeDropFK, ChangeDropCheck, ChangeDetachPartition, ChangeDropEnumValue,
+				ChangeDropRangeType, ChangeDropCompositeType:
 				symbol = "-"
 			}
 		}
@@ -218,6 +224,12 @@ func hazardRemediation(code HazardCode) string {
 		return "verify existing values fit the narrower type, or widen the type instead of narrowing"
 	case HazardNotNullNoDefault:
 		return "backfill existing rows first, or add the column with a DEFAULT"
+	case HazardDropEnumValue:
+		return "PostgreSQL does not support dropping enum values directly; recreate the enum type or map the value via Options.Renames"
+	case HazardDropRangeType:
+		return "allow via DropPolicy AllowRangeType and accept DROP_RANGE_TYPE; dependent tables or columns will lose the type"
+	case HazardDropCompositeType:
+		return "allow via DropPolicy AllowCompositeType and accept DROP_COMPOSITE_TYPE; dependent tables or columns will lose the type"
 	default:
 		// Exhaustiveness: new CRITICAL hazard codes should add a hint here.
 		// WARNING/NOTICE codes carry their own description.
@@ -455,6 +467,39 @@ func stepOperationSummary(s Step) string {
 
 	case ChangeAlterEnum:
 		return fmt.Sprintf("ALTER TYPE %s ADD VALUE", tbl)
+
+	case ChangeRenameEnumValue:
+		if s.OldEnumValue != "" && s.EnumValue != "" {
+			return fmt.Sprintf("RENAME ENUM VALUE %s.%s TO %s", tbl, s.OldEnumValue, s.EnumValue)
+		}
+		return fmt.Sprintf("RENAME ENUM VALUE ON %s", tbl)
+
+	case ChangeDropEnumValue:
+		if s.OldEnumValue != "" {
+			return fmt.Sprintf("DROP ENUM VALUE %s.%s", tbl, s.OldEnumValue)
+		}
+		return fmt.Sprintf("DROP ENUM VALUE ON %s", tbl)
+
+	case ChangeCreateRangeType:
+		return fmt.Sprintf("CREATE TYPE %s AS RANGE", tbl)
+
+	case ChangeDropRangeType:
+		return fmt.Sprintf("DROP TYPE %s", tbl)
+
+	case ChangeCreateCompositeType:
+		return fmt.Sprintf("CREATE TYPE %s AS", tbl)
+
+	case ChangeAlterCompositeType:
+		if s.CompositeAttr != "" {
+			if s.Destructive {
+				return fmt.Sprintf("DROP ATTRIBUTE %s ON TYPE %s", s.CompositeAttr, tbl)
+			}
+			return fmt.Sprintf("ALTER TYPE %s (attribute %s)", tbl, s.CompositeAttr)
+		}
+		return fmt.Sprintf("ALTER TYPE %s", tbl)
+
+	case ChangeDropCompositeType:
+		return fmt.Sprintf("DROP TYPE %s", tbl)
 
 	default:
 		return strings.TrimSuffix(strings.TrimSpace(s.SQL), ";")
