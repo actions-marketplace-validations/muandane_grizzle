@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -332,5 +333,17 @@ func TestGolden_Formats(t *testing.T) {
 		if got != string(want) {
 			t.Errorf("golden mismatch for %s:\n--- got ---\n%s\n--- want ---\n%s", name, got, string(want))
 		}
+	}
+}
+
+func TestDefaultRules_AllRuleIDs(t *testing.T) {
+	rules := DefaultRules()
+	var ids []string
+	for _, r := range rules {
+		ids = append(ids, r.ID())
+	}
+	want := []string{"L001", "L002", "L003", "L004", "L005", "L006", "L007", "L008", "L009", "L010", "L011"}
+	if !slices.Equal(ids, want) {
+		t.Errorf("DefaultRules() IDs = %v, want %v", ids, want)
 	}
 }

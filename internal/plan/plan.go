@@ -41,6 +41,7 @@ const (
 	ChangeForceRLS           ChangeType = "FORCE_RLS"
 	ChangeNoForceRLS         ChangeType = "NO_FORCE_RLS"
 	ChangeCreatePolicy       ChangeType = "CREATE_POLICY"
+	ChangeAlterPolicy        ChangeType = "ALTER_POLICY"
 	ChangeDropPolicy         ChangeType = "DROP_POLICY"
 	ChangeCreateFunction     ChangeType = "CREATE_FUNCTION"
 	ChangeDropFunction       ChangeType = "DROP_FUNCTION"
@@ -371,7 +372,7 @@ func (p *Plan) Modifications() int {
 	count := 0
 	for _, s := range p.Steps {
 		switch s.Type {
-		case ChangeAlterColumn, ChangeAlterEnum, ChangeRefreshMatView,
+		case ChangeAlterColumn, ChangeAlterEnum, ChangeAlterPolicy, ChangeRefreshMatView,
 			ChangeDisableRLS, ChangeNoForceRLS, ChangeAlterDomain, ChangeRevoke,
 			ChangeAlterRole, ChangeAlterPublication, ChangeAlterSubscription, ChangeAlterEventTrigger:
 			count++

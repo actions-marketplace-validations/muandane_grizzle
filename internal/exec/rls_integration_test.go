@@ -77,49 +77,67 @@ func TestRLS_PolicyLifecycle(t *testing.T) {
 		t.Fatalf("second sync must be a no-op, got %+v", p.Steps)
 	}
 
-	// 3. Edit policy expression: DROP + CREATE.
+	// 3. Edit policy expression: ALTER POLICY (non-destructive).
 	p2, err := exec.PlanDiffPostgres(ctx, db, newCfg(policy("owner_id = 2")))
 	if err != nil {
 		t.Fatalf("edit plan: %v", err)
 	}
-	var sawDrop, sawCreate bool
+	var sawAlter bool
 	for _, s := range p2.Steps {
-		switch s.Type {
-		case plan.ChangeDropPolicy:
-			sawDrop = true
-			if !s.Destructive {
-				t.Errorf("DROP_POLICY step must be destructive")
+		if s.Type == plan.ChangeAlterPolicy {
+			sawAlter = true
+			if s.Destructive {
+				t.Errorf("ALTER_POLICY step must not be destructive")
 			}
-		case plan.ChangeCreatePolicy:
-			sawCreate = true
 		}
 	}
-	if !sawDrop || !sawCreate {
-		t.Fatalf("expected DROP_POLICY + CREATE_POLICY, got %+v", p2.Steps)
+	if !sawAlter {
+		t.Fatalf("expected ALTER_POLICY, got %+v", p2.Steps)
 	}
 
-	// 4. Apply the replace: destructive DROP_POLICY is gated — must fail
-	// without the allow flag, then succeed with AllowPolicy + AcceptHazards.
-	if err := exec.SyncPostgres(ctx, db, newCfg(policy("owner_id = 2"))); err == nil {
-		t.Fatalf("replace sync must fail with default policy (AllowPolicy=false)")
+	// 4. Apply the edit: non-destructive ALTER_POLICY succeeds with default policy (AllowPolicy=false).
+	if err := exec.SyncPostgres(ctx, db, newCfg(policy("owner_id = 2"))); err != nil {
+		t.Fatalf("alter sync: %v", err)
+	}
+	p3, err := exec.PlanDiffPostgres(ctx, db, newCfg(policy("owner_id = 2")))
+	if err != nil {
+		t.Fatalf("post-alter plan: %v", err)
+	}
+	if len(p3.Steps) != 0 {
+		t.Fatalf("post-alter sync must be a no-op, got %+v", p3.Steps)
+	}
+
+	// 5. Change policy command (SELECT -> ALL): requires DROP + CREATE and triggers destructive gate.
+	cmdPolicy := func(cmd string) string {
+		return fmt.Sprintf(`
+			CREATE TABLE docs (
+				id BIGINT PRIMARY KEY,
+				owner_id BIGINT NOT NULL
+			);
+			ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+			CREATE POLICY docs_select_own ON docs FOR %s TO app_role USING (owner_id = 2);
+		`, cmd)
+	}
+	if err := exec.SyncPostgres(ctx, db, newCfg(cmdPolicy("ALL"))); err == nil {
+		t.Fatalf("command change sync must fail with default policy (AllowPolicy=false)")
 	} else {
 		var dve *plan.DestructiveViolationError
 		if !errors.As(err, &dve) {
 			t.Fatalf("expected destructive violation, got: %v", err)
 		}
 	}
-	replaceCfg := newCfg(policy("owner_id = 2"))
+	replaceCfg := newCfg(cmdPolicy("ALL"))
 	replaceCfg.Policy = plan.DropPolicy{AllowPolicy: true}
 	replaceCfg.AcceptHazards = []plan.HazardCode{plan.HazardDropPolicy}
 	if err := exec.SyncPostgres(ctx, db, replaceCfg); err != nil {
 		t.Fatalf("replace sync: %v", err)
 	}
-	p3, err := exec.PlanDiffPostgres(ctx, db, newCfg(policy("owner_id = 2")))
+	p4, err := exec.PlanDiffPostgres(ctx, db, newCfg(cmdPolicy("ALL")))
 	if err != nil {
 		t.Fatalf("post-replace plan: %v", err)
 	}
-	if len(p3.Steps) != 0 {
-		t.Fatalf("post-replace sync must be a no-op, got %+v", p3.Steps)
+	if len(p4.Steps) != 0 {
+		t.Fatalf("post-replace sync must be a no-op, got %+v", p4.Steps)
 	}
 }
 

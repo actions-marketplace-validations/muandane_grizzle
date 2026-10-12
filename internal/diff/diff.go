@@ -696,20 +696,30 @@ func DiffWithMappings(live, desired *schema.Schema, targetSchema, shadowSchema s
 				continue
 			}
 			if !policiesEqual(lPol, dPol, normalize) {
-				changes = append(changes, Change{
-					Type:        plan.ChangeDropPolicy,
-					Schema:      targetSchema,
-					Table:       tblName,
-					Policy:      lPol,
-					Destructive: true,
-				})
-				changes = append(changes, Change{
-					Type:        plan.ChangeCreatePolicy,
-					Schema:      targetSchema,
-					Table:       tblName,
-					Policy:      &polCopy,
-					Destructive: false,
-				})
+				if canAlterPolicy(lPol, dPol) {
+					changes = append(changes, Change{
+						Type:        plan.ChangeAlterPolicy,
+						Schema:      targetSchema,
+						Table:       tblName,
+						Policy:      &polCopy,
+						Destructive: false,
+					})
+				} else {
+					changes = append(changes, Change{
+						Type:        plan.ChangeDropPolicy,
+						Schema:      targetSchema,
+						Table:       tblName,
+						Policy:      lPol,
+						Destructive: true,
+					})
+					changes = append(changes, Change{
+						Type:        plan.ChangeCreatePolicy,
+						Schema:      targetSchema,
+						Table:       tblName,
+						Policy:      &polCopy,
+						Destructive: false,
+					})
+				}
 			}
 		}
 		for polName, lPol := range lTable.Policies {
@@ -1315,6 +1325,31 @@ func policiesEqual(l, d *schema.Policy, normalize func(string) string) bool {
 		return false
 	}
 	return normalize(l.WithCheck) == normalize(d.WithCheck)
+}
+
+// canAlterPolicy reports whether policy drift can be applied via ALTER POLICY.
+// In PostgreSQL, ALTER POLICY can change roles (TO), USING expressions, and
+// WITH CHECK expressions. It cannot change the FOR command (ALL, SELECT, etc.)
+// or the PERMISSIVE / RESTRICTIVE mode; changing those requires DROP + CREATE.
+// Additionally, if an existing USING or WITH CHECK expression is removed entirely,
+// ALTER POLICY cannot unset it, so DROP + CREATE is retained.
+func canAlterPolicy(l, d *schema.Policy) bool {
+	if l == nil || d == nil {
+		return false
+	}
+	if l.Cmd != d.Cmd || l.Permissive != d.Permissive {
+		return false
+	}
+	if strings.TrimSpace(l.Using) != "" && strings.TrimSpace(d.Using) == "" {
+		return false
+	}
+	if strings.TrimSpace(l.WithCheck) != "" && strings.TrimSpace(d.WithCheck) == "" {
+		return false
+	}
+	if len(l.Roles) > 0 && len(d.Roles) == 0 {
+		return false
+	}
+	return true
 }
 
 // findSurvivingTriggerDeps lists managed triggers that survive the diff

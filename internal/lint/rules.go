@@ -1,8 +1,9 @@
 package lint
 
 import (
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/muandane/grizzle/internal/schema"
@@ -310,39 +311,35 @@ func sortedTableNames(s *schema.Schema) []string {
 	if s == nil {
 		return nil
 	}
-	names := make([]string, 0, len(s.Tables))
-	for n := range s.Tables {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(s.Tables))
 }
 
 func sortedColumnNames(t *schema.Table) []string {
-	names := make([]string, 0, len(t.Columns))
-	for n := range t.Columns {
-		names = append(names, n)
+	if t == nil {
+		return nil
 	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(t.Columns))
 }
 
 func sortedIndexNames(t *schema.Table) []string {
-	names := make([]string, 0, len(t.Indexes))
-	for n := range t.Indexes {
-		names = append(names, n)
+	if t == nil {
+		return nil
 	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(t.Indexes))
 }
 
 func sortedFKNames(t *schema.Table) []string {
-	names := make([]string, 0, len(t.ForeignKeys))
-	for n := range t.ForeignKeys {
-		names = append(names, n)
+	if t == nil {
+		return nil
 	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(t.ForeignKeys))
+}
+
+func sortedTriggerNames(t *schema.Table) []string {
+	if t == nil {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(t.Triggers))
 }
 
 // CheckNamingConvention (L005) reports CHECK constraint names that are not
@@ -547,19 +544,15 @@ func closesAtEnd(s string) bool {
 }
 
 func sortedCheckNames(t *schema.Table) []string {
-	names := make([]string, 0, len(t.Checks))
-	for n := range t.Checks {
-		names = append(names, n)
+	if t == nil {
+		return nil
 	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(t.Checks))
 }
 
 func sortedEnumNames(s *schema.Schema) []string {
-	names := make([]string, 0, len(s.Enums))
-	for n := range s.Enums {
-		names = append(names, n)
+	if s == nil {
+		return nil
 	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(s.Enums))
 }

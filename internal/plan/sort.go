@@ -57,6 +57,7 @@ func SortSteps(steps []Step) {
 		ChangeDisableRLS:            86,
 		ChangeNoForceRLS:            86,
 		ChangeCreatePolicy:          87, // 10b. Policies after RLS enabled
+		ChangeAlterPolicy:           87,
 		ChangeCreateTrigger:         88, // 10c. Triggers after functions and columns
 		ChangeCommentTable:          89, // 10c'. Comments after all objects exist
 		ChangeCommentColumn:         89,

@@ -326,6 +326,30 @@ func GenerateCreatePolicySQL(targetSchema, tableName string, p *schema.Policy) s
 	return b.String()
 }
 
+// GenerateAlterPolicySQL constructs an ALTER POLICY statement for expression and role updates.
+func GenerateAlterPolicySQL(targetSchema, tableName string, p *schema.Policy) string {
+	if p == nil || p.Name == "" {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "ALTER POLICY %q ON %q.%q", p.Name, targetSchema, tableName)
+	if len(p.Roles) > 0 {
+		quoted := make([]string, 0, len(p.Roles))
+		for _, r := range p.Roles {
+			quoted = append(quoted, fmt.Sprintf("%q", r))
+		}
+		b.WriteString(" TO " + strings.Join(quoted, ", "))
+	}
+	if strings.TrimSpace(p.Using) != "" {
+		b.WriteString(" USING (" + strings.TrimSpace(p.Using) + ")")
+	}
+	if strings.TrimSpace(p.WithCheck) != "" {
+		b.WriteString(" WITH CHECK (" + strings.TrimSpace(p.WithCheck) + ")")
+	}
+	b.WriteString(";")
+	return b.String()
+}
+
 // GenerateDropPolicySQL constructs a DROP POLICY statement.
 func GenerateDropPolicySQL(targetSchema, tableName, policyName string) string {
 	return fmt.Sprintf("DROP POLICY IF EXISTS %q ON %q.%q;", policyName, targetSchema, tableName)
@@ -570,6 +594,8 @@ func RenderChangeWithOpts(targetSchema string, c diff.Change, opts RenderOpts) p
 		step.SQL = GenerateRLSSQL(effectiveSchema, c.Table, c.Type)
 	case plan.ChangeCreatePolicy:
 		step.SQL = GenerateCreatePolicySQL(effectiveSchema, c.Table, c.Policy)
+	case plan.ChangeAlterPolicy:
+		step.SQL = GenerateAlterPolicySQL(effectiveSchema, c.Table, c.Policy)
 	case plan.ChangeDropPolicy:
 		polName := ""
 		if c.Policy != nil {

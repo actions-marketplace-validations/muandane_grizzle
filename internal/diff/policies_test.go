@@ -55,13 +55,14 @@ func TestDiff_RLSAndPolicies_GreenfieldExistingTable(t *testing.T) {
 	}
 }
 
-func TestDiff_PolicyExpressionEditProducesDropAndCreate(t *testing.T) {
+func TestDiff_PolicyExpressionEditProducesAlterPolicy(t *testing.T) {
 	pol := func(using string) *schema.Policy {
 		return &schema.Policy{
-			Name:  "docs_select_own",
-			Cmd:   "SELECT",
-			Roles: []string{"app"},
-			Using: using,
+			Name:       "docs_select_own",
+			Cmd:        "SELECT",
+			Roles:      []string{"app"},
+			Using:      using,
+			Permissive: true,
 		}
 	}
 	liveTable := newTable("docs")
@@ -70,6 +71,46 @@ func TestDiff_PolicyExpressionEditProducesDropAndCreate(t *testing.T) {
 	desiredTable := newTable("docs")
 	desiredTable.RLSEnabled = true
 	desiredTable.Policies = map[string]*schema.Policy{"docs_select_own": pol("owner_id = 2")}
+
+	changes, err := diff.Diff(
+		&schema.Schema{Name: "public", Tables: map[string]*schema.Table{"docs": liveTable}},
+		&schema.Schema{Name: "public", Tables: map[string]*schema.Table{"docs": desiredTable}},
+		"public", "", scope.Filters{},
+	)
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected exactly 1 change, got %d (%+v)", len(changes), changes)
+	}
+	c := changes[0]
+	if c.Type != plan.ChangeAlterPolicy {
+		t.Errorf("expected ChangeAlterPolicy, got %s", c.Type)
+	}
+	if c.Destructive {
+		t.Errorf("ALTER_POLICY must not be destructive")
+	}
+}
+
+func TestDiff_PolicyCmdOrPermissiveChangeProducesDropAndCreate(t *testing.T) {
+	liveTable := newTable("docs")
+	liveTable.RLSEnabled = true
+	liveTable.Policies = map[string]*schema.Policy{"docs_select_own": {
+		Name:       "docs_select_own",
+		Cmd:        "SELECT",
+		Roles:      []string{"app"},
+		Using:      "owner_id = 1",
+		Permissive: true,
+	}}
+	desiredTable := newTable("docs")
+	desiredTable.RLSEnabled = true
+	desiredTable.Policies = map[string]*schema.Policy{"docs_select_own": {
+		Name:       "docs_select_own",
+		Cmd:        "ALL", // command changed -> must DROP + CREATE
+		Roles:      []string{"app"},
+		Using:      "owner_id = 1",
+		Permissive: true,
+	}}
 
 	changes, err := diff.Diff(
 		&schema.Schema{Name: "public", Tables: map[string]*schema.Table{"docs": liveTable}},

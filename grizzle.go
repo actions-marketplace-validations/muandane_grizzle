@@ -121,6 +121,7 @@ const (
 	ChangeForceRLS           = plan.ChangeForceRLS
 	ChangeNoForceRLS         = plan.ChangeNoForceRLS
 	ChangeCreatePolicy       = plan.ChangeCreatePolicy
+	ChangeAlterPolicy        = plan.ChangeAlterPolicy
 	ChangeDropPolicy         = plan.ChangeDropPolicy
 	ChangeCreateFunction     = plan.ChangeCreateFunction
 	ChangeDropFunction       = plan.ChangeDropFunction

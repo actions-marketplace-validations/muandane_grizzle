@@ -7,10 +7,11 @@
 package lint
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/muandane/grizzle/internal/schema"
@@ -59,7 +60,7 @@ func Lint(s *schema.Schema, rules ...Rule) []Diagnostic {
 	return diags
 }
 
-// DefaultRules returns the built-in rule set (L001..L009).
+// DefaultRules returns the built-in rule set (L001..L011).
 func DefaultRules() []Rule {
 	return []Rule{
 		MissingPrimaryKey{},
@@ -71,6 +72,8 @@ func DefaultRules() []Rule {
 		PreferNamedChecks{},
 		RLSEnableWithoutPolicies{},
 		NoDMLStatements{},
+		TriggerWithoutFunction{},
+		UnversionedExtension{},
 	}
 }
 
@@ -85,18 +88,17 @@ func HasErrors(diags []Diagnostic) bool {
 }
 
 func sortDiagnostics(diags []Diagnostic) {
-	sort.SliceStable(diags, func(i, j int) bool {
-		a, b := diags[i], diags[j]
-		switch {
-		case a.RuleID != b.RuleID:
-			return a.RuleID < b.RuleID
-		case a.Table != b.Table:
-			return a.Table < b.Table
-		case a.Column != b.Column:
-			return a.Column < b.Column
-		default:
-			return a.Message < b.Message
+	slices.SortStableFunc(diags, func(a, b Diagnostic) int {
+		if c := cmp.Compare(a.RuleID, b.RuleID); c != 0 {
+			return c
 		}
+		if c := cmp.Compare(a.Table, b.Table); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Column, b.Column); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Message, b.Message)
 	})
 }
 
