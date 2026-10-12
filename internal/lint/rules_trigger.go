@@ -1,6 +1,7 @@
 package lint
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
 	"strings"
@@ -86,19 +87,15 @@ func routineExists(s *schema.Schema, target string) bool {
 	if s == nil || len(s.Routines) == 0 {
 		return false
 	}
-	targetClean := strings.ToLower(cleanFunctionName(target))
+	targetClean := cleanFunctionName(target)
 	for k, r := range s.Routines {
-		rName := ""
-		if r != nil && r.Name != "" {
+		var rName string
+		if r != nil {
 			rName = r.Name
-		} else {
-			if before, _, ok := strings.Cut(k, "("); ok {
-				rName = before
-			} else {
-				rName = k
-			}
 		}
-		if strings.ToLower(cleanFunctionName(rName)) == targetClean {
+		before, _, _ := strings.Cut(k, "(")
+		rName = cmp.Or(rName, before, k)
+		if strings.EqualFold(cleanFunctionName(rName), targetClean) {
 			return true
 		}
 	}

@@ -506,19 +506,17 @@ func WrapShadowCompileError(err error, sqlStr string) error {
 	errStr := err.Error()
 
 	var pgErr *pgconn.PgError
-	if pe, ok := errors.AsType[*pgconn.PgError](err); ok {
-		pgErr = pe
-	}
+	errors.As(err, &pgErr)
 
 	// 3. Missing extension / undefined type
 	if m := undefinedTypeRe.FindStringSubmatch(errStr); m != nil || (pgErr != nil && pgErr.Code == "42704") {
-		typeName := ""
+		var rawType string
 		if m != nil {
-			typeName = cleanIdentifier(m[1])
-		} else if pgErr != nil && pgErr.DataTypeName != "" {
-			typeName = cleanIdentifier(pgErr.DataTypeName)
+			rawType = m[1]
+		} else if pgErr != nil {
+			rawType = pgErr.DataTypeName
 		}
-		if typeName != "" {
+		if typeName := cleanIdentifier(rawType); typeName != "" {
 			objDesc := fmt.Sprintf("type %q", typeName)
 			stmtTarget := findStatementForIdentifier(sqlStr, typeName, objDesc)
 			target := formatFullTarget(stmtTarget, objDesc)
@@ -528,10 +526,10 @@ func WrapShadowCompileError(err error, sqlStr string) error {
 
 	// 4. Undefined function
 	if m := undefinedFuncRe.FindStringSubmatch(errStr); m != nil || (pgErr != nil && pgErr.Code == "42883") {
-		funcRaw := ""
+		var funcRaw string
 		if m != nil {
 			funcRaw = m[1]
-		} else if pgErr != nil && pgErr.Routine != "" {
+		} else if pgErr != nil {
 			funcRaw = pgErr.Routine
 		}
 		if funcRaw != "" {
@@ -545,22 +543,19 @@ func WrapShadowCompileError(err error, sqlStr string) error {
 
 	// 5. Missing column (checked before relation to catch 'column X of relation Y does not exist')
 	if m := undefinedColumnRe.FindStringSubmatch(errStr); m != nil || (pgErr != nil && pgErr.Code == "42703") {
-		colName := ""
-		tblInErr := ""
+		var colName, tblInErr string
 		if m != nil {
 			colName = cleanIdentifier(m[1])
-			if len(m) > 2 && m[2] != "" {
+			if len(m) > 2 {
 				tblInErr = cleanIdentifier(m[2])
 			}
-		} else if pgErr != nil && pgErr.ColumnName != "" {
+		} else if pgErr != nil {
 			colName = cleanIdentifier(pgErr.ColumnName)
-			if pgErr.TableName != "" {
-				tblInErr = cleanIdentifier(pgErr.TableName)
-			}
+			tblInErr = cleanIdentifier(pgErr.TableName)
 		}
 		if colName != "" {
 			objDesc := fmt.Sprintf("column %q", colName)
-			stmtTarget := ""
+			var stmtTarget string
 			if tblInErr != "" {
 				stmtTarget = fmt.Sprintf("table %q", tblInErr)
 			} else {
@@ -573,13 +568,13 @@ func WrapShadowCompileError(err error, sqlStr string) error {
 
 	// 6. Missing table/relation in foreign key or view
 	if m := undefinedRelationRe.FindStringSubmatch(errStr); m != nil || (pgErr != nil && pgErr.Code == "42P01") {
-		relName := ""
+		var rawRel string
 		if m != nil {
-			relName = cleanIdentifier(m[2])
-		} else if pgErr != nil && pgErr.TableName != "" {
-			relName = cleanIdentifier(pgErr.TableName)
+			rawRel = m[2]
+		} else if pgErr != nil {
+			rawRel = pgErr.TableName
 		}
-		if relName != "" {
+		if relName := cleanIdentifier(rawRel); relName != "" {
 			objDesc := fmt.Sprintf("relation %q", relName)
 			stmtTarget := findStatementForIdentifier(sqlStr, relName, objDesc)
 			target := formatFullTarget(stmtTarget, objDesc)
@@ -885,17 +880,21 @@ func extractObjectName(tokens, upperTokens []string, start int) string {
 	return ""
 }
 
+// cleanIdentifier strips quotes and removes the temporary shadow schema prefix
+// (e.g. "_grizzle_shadow_public.users" -> "users") so that error messages report
+// the desired schema object name rather than internal compilation sandboxes.
 func cleanIdentifier(s string) string {
 	s = strings.Trim(s, `"'`+"`;")
-	parts := strings.Split(s, ".")
-	last := parts[len(parts)-1]
-	last = strings.Trim(last, `"'`+"`;")
-	if after, ok := strings.CutPrefix(last, "_grizzle_shadow_"); ok {
-		last = after
-	} else if last == "_grizzle_shadow" {
-		last = ""
+	if _, last, ok := strings.CutLast(s, "."); ok {
+		s = last
 	}
-	return last
+	s = strings.Trim(s, `"'`+"`;")
+	if after, ok := strings.CutPrefix(s, "_grizzle_shadow_"); ok {
+		s = after
+	} else if s == "_grizzle_shadow" {
+		s = ""
+	}
+	return s
 }
 
 func findStatementAtPosition(sqlStr string, pos int) string {

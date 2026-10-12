@@ -153,7 +153,7 @@ func SplitStatements(sql string) []string {
 func ExtractStatements(sql string) StatementGroups {
 	var shadow, roles, catalog []string
 	for _, stmt := range SplitStatements(sql) {
-		trimmed := stripLeadingSQLComments(stmt)
+		trimmed := StripLeadingSQLComments(stmt)
 		switch {
 		case roleStatementRe.MatchString(trimmed):
 			roles = append(roles, stmt)
@@ -170,11 +170,11 @@ func ExtractStatements(sql string) StatementGroups {
 	}
 }
 
-// stripLeadingSQLComments removes whitespace and SQL comments before the
+// StripLeadingSQLComments removes whitespace and SQL comments before the
 // first statement token. It is intentionally separate from SplitStatements:
 // comments remain in each returned statement and are preserved in the
 // corresponding output bucket.
-func stripLeadingSQLComments(s string) string {
+func StripLeadingSQLComments(s string) string {
 	for {
 		s = strings.TrimSpace(s)
 		switch {
@@ -194,6 +194,10 @@ func stripLeadingSQLComments(s string) string {
 			return s
 		}
 	}
+}
+
+func stripLeadingSQLComments(s string) string {
+	return StripLeadingSQLComments(s)
 }
 
 func joinStatements(stmts []string) string {

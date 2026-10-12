@@ -1,6 +1,7 @@
 package lint
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"regexp"
@@ -43,37 +44,20 @@ func (UnversionedExtension) Check(s *schema.Schema) []Diagnostic {
 	// 1. Inspect SourceSQL if present.
 	if s.SourceSQL != "" {
 		for _, rawStmt := range schema.SplitStatements(s.SourceSQL) {
-			stmt := stripLeadingSQLComments(rawStmt)
+			stmt := schema.StripLeadingSQLComments(rawStmt)
 			m := createExtensionStmtRe.FindStringSubmatch(stmt)
 			if m == nil {
 				continue
 			}
-			name := m[1]
-			if name == "" {
-				name = m[2]
-			}
-			remainder := m[3]
+			name := cmp.Or(m[1], m[2])
 			key := strings.ToLower(name)
 			if evaluated[key] {
 				continue
 			}
 			evaluated[key] = true
 
-			vm := versionPinRe.FindStringSubmatch(remainder)
-			hasVersion := false
-			if vm != nil {
-				ver := vm[1]
-				if ver == "" {
-					ver = vm[2]
-				}
-				if ver == "" {
-					ver = vm[3]
-				}
-				if strings.TrimSpace(ver) != "" {
-					hasVersion = true
-				}
-			}
-
+			vm := versionPinRe.FindStringSubmatch(m[3])
+			hasVersion := vm != nil && strings.TrimSpace(cmp.Or(vm[1], vm[2], vm[3])) != ""
 			if !hasVersion {
 				diags = append(diags, Diagnostic{
 					RuleID:   "L011",
@@ -91,10 +75,7 @@ func (UnversionedExtension) Check(s *schema.Schema) []Diagnostic {
 			if ext == nil {
 				continue
 			}
-			extName := ext.Name
-			if extName == "" {
-				extName = key
-			}
+			extName := cmp.Or(ext.Name, key)
 			lowerKey := strings.ToLower(extName)
 			if evaluated[lowerKey] {
 				continue
@@ -112,28 +93,4 @@ func (UnversionedExtension) Check(s *schema.Schema) []Diagnostic {
 	}
 
 	return diags
-}
-
-// stripLeadingSQLComments removes leading whitespace, single-line (--), and
-// multi-line (/* ... */) comments before the first SQL statement token.
-func stripLeadingSQLComments(s string) string {
-	for {
-		s = strings.TrimSpace(s)
-		switch {
-		case strings.HasPrefix(s, "--"):
-			if newline := strings.IndexByte(s, '\n'); newline >= 0 {
-				s = s[newline+1:]
-				continue
-			}
-			return ""
-		case strings.HasPrefix(s, "/*"):
-			if end := strings.Index(s[2:], "*/"); end >= 0 {
-				s = s[end+4:]
-				continue
-			}
-			return s
-		default:
-			return s
-		}
-	}
 }

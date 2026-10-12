@@ -1,6 +1,7 @@
 package lint
 
 import (
+	"cmp"
 	"maps"
 	"regexp"
 	"slices"
@@ -307,39 +308,48 @@ func splitColumns(list string) []string {
 	return cols
 }
 
+// sortedKeys returns a deterministically sorted slice of keys from any map
+// whose key type is ordered. Returns nil when m is nil.
+func sortedKeys[K cmp.Ordered, V any](m map[K]V) []K {
+	if m == nil {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(m))
+}
+
 func sortedTableNames(s *schema.Schema) []string {
 	if s == nil {
 		return nil
 	}
-	return slices.Sorted(maps.Keys(s.Tables))
+	return sortedKeys(s.Tables)
 }
 
 func sortedColumnNames(t *schema.Table) []string {
 	if t == nil {
 		return nil
 	}
-	return slices.Sorted(maps.Keys(t.Columns))
+	return sortedKeys(t.Columns)
 }
 
 func sortedIndexNames(t *schema.Table) []string {
 	if t == nil {
 		return nil
 	}
-	return slices.Sorted(maps.Keys(t.Indexes))
+	return sortedKeys(t.Indexes)
 }
 
 func sortedFKNames(t *schema.Table) []string {
 	if t == nil {
 		return nil
 	}
-	return slices.Sorted(maps.Keys(t.ForeignKeys))
+	return sortedKeys(t.ForeignKeys)
 }
 
 func sortedTriggerNames(t *schema.Table) []string {
 	if t == nil {
 		return nil
 	}
-	return slices.Sorted(maps.Keys(t.Triggers))
+	return sortedKeys(t.Triggers)
 }
 
 // CheckNamingConvention (L005) reports CHECK constraint names that are not
@@ -547,12 +557,12 @@ func sortedCheckNames(t *schema.Table) []string {
 	if t == nil {
 		return nil
 	}
-	return slices.Sorted(maps.Keys(t.Checks))
+	return sortedKeys(t.Checks)
 }
 
 func sortedEnumNames(s *schema.Schema) []string {
 	if s == nil {
 		return nil
 	}
-	return slices.Sorted(maps.Keys(s.Enums))
+	return sortedKeys(s.Enums)
 }
