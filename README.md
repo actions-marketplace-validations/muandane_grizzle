@@ -78,6 +78,16 @@ func main() {
 
 ## CLI
 
+### Installation
+
+```bash
+go install github.com/muandane/grizzle/cmd/grizzle@latest
+```
+
+Pre-compiled binaries for Linux, macOS, and Windows are also available on [GitHub Releases](https://github.com/muandane/grizzle/releases).
+
+### Usage
+
 Use the CLI for CI drift checks, dry runs, or exporting plans to standard migration tools:
 
 ```bash
