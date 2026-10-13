@@ -45,6 +45,11 @@ type Options struct {
 	// For SQLite, entries other than "main" are ATTACH DATABASE schema names listed in SQLiteAttach.
 	TargetSchemas []string
 
+	// TargetSchemaPattern specifies a LIKE-style pattern to discover target PostgreSQL schemas
+	// dynamically from pg_namespace (e.g. "tenant_%"). Discovered schemas are sorted deterministically,
+	// exclude system schemas, and are populated into TargetSchemas.
+	TargetSchemaPattern string
+
 	// SQLiteAttach maps ATTACH DATABASE schema names to filesystem paths.
 	// Every TargetSchemas entry other than "main" must appear here; "main" is
 	// the primary database already open and must not be listed. Unknown keys,
@@ -333,6 +338,14 @@ func WithTargetSchemas(schemas ...string) Option {
 	}
 }
 
+// WithTargetSchemaPattern sets a LIKE-style pattern to discover target PostgreSQL schemas
+// dynamically from pg_namespace (e.g. "tenant_%").
+func WithTargetSchemaPattern(pattern string) Option {
+	return func(o *Options) {
+		o.TargetSchemaPattern = pattern
+	}
+}
+
 // WithSQLiteAttach sets the SQLite ATTACH DATABASE map (schema name → path).
 func WithSQLiteAttach(attach map[string]string) Option {
 	return func(o *Options) {
@@ -488,8 +501,15 @@ func (o *Options) Validate() error {
 		return fmt.Errorf("%w: SQLiteRebuildBatchSize must be non-negative", ErrInvalidOptions)
 	}
 
+	if o.TargetSchemaPattern != "" && (len(o.TargetSchemas) > 0 || o.TargetSchema != "") {
+		return fmt.Errorf("%w: cannot specify both TargetSchemaPattern and TargetSchema/TargetSchemas", ErrInvalidOptions)
+	}
+
 	switch o.Dialect {
 	case DialectSQLite:
+		if o.TargetSchemaPattern != "" {
+			return fmt.Errorf("%w: TargetSchemaPattern requires PostgreSQL; multi-tenant schema patterns are not supported on SQLite", ErrInvalidOptions)
+		}
 		if err := validateSQLiteAttach(o); err != nil {
 			return err
 		}

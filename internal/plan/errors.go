@@ -43,6 +43,9 @@ var (
 	// ErrInvalidOptions is returned when provided Options fail validation.
 	ErrInvalidOptions = errors.New("grizzle: invalid options")
 
+	// ErrNoMatchingSchemas is returned when TargetSchemaPattern matches zero schemas.
+	ErrNoMatchingSchemas = errors.New("grizzle: no schemas matched pattern")
+
 	// ErrStrictScope is returned when StrictScope is enabled but no IncludeTables are specified.
 	ErrStrictScope = errors.New("grizzle: strict scope violation (IncludeTables required)")
 

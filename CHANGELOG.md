@@ -16,7 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Keyset pagination with SQL row-value comparison `(pk1, ..., pkN) > ($1, ..., $N)` and tuple `IN` updates supporting $N$-column composite primary keys ($N \ge 1$) across PostgreSQL and SQLite.
   - Index verification: requires and verifies that a database index exists whose leading columns match the primary key column order before keyset traversal begins.
   - Mid-run resumption: seamlessly resumes backfill progression from partially-backfilled batches without skipping or duplicating rows.
-  - NULL-free guarantee documentation: primary key columns are constrained NOT NULL by relational database standards, eliminating SQL three-valued logic edge cases in row constructor comparisons.
+- **Multi-Tenant Schema Patterns** (`Options.TargetSchemaPattern` / `--target-schema-pattern` / `--schema-pattern`):
+  - Dynamic discovery of PostgreSQL schemas via `pg_namespace` matching LIKE patterns (e.g. `tenant_%`), sorted in deterministic ascending order.
+  - Automatic exclusion of PostgreSQL system schemas (`pg_%`, `information_schema`) and Grizzle shadow/internal schemas (`_grizzle%`).
+  - Plan drift detection: discovered schema list populates `Plan.TargetSchemas` and participates in `Plan.Hash()`, detecting schema additions and removals.
+  - Preserves full backward compatibility with explicit `Options.TargetSchema` and `Options.TargetSchemas`.
+  - CLI flag support via `--target-schema-pattern` and `--schema-pattern`, configuration file support (`target_schema_pattern` / `schema_pattern`), and `ErrNoMatchingSchemas` when zero schemas match.
 
 ## [v0.1.0] - 2026-10-13
 

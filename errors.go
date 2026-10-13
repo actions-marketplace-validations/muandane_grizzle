@@ -40,6 +40,9 @@ var (
 	// ErrInvalidOptions is returned when provided Options fail validation.
 	ErrInvalidOptions = plan.ErrInvalidOptions
 
+	// ErrNoMatchingSchemas is returned when TargetSchemaPattern matches zero schemas.
+	ErrNoMatchingSchemas = plan.ErrNoMatchingSchemas
+
 	// ErrStrictScope is returned when StrictScope is enabled but no IncludeTables are specified.
 	ErrStrictScope = plan.ErrStrictScope
 

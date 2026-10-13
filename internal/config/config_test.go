@@ -14,7 +14,7 @@ func TestConfig_YAML(t *testing.T) {
 dsn: "postgres://user:pass@localhost:5432/app"
 schema: "db/schema.sql"
 dialect: "postgres"
-target_schema: "public"
+target_schema_pattern: "tenant_%"
 allow_drop: true
 roles: "db/roles.sql"
 seed: "db/seed.sql"
@@ -50,8 +50,8 @@ lint:
 	if cfg.Dialect != "postgres" {
 		t.Errorf("expected Dialect postgres, got %s", cfg.Dialect)
 	}
-	if cfg.TargetSchema != "public" {
-		t.Errorf("expected TargetSchema public, got %s", cfg.TargetSchema)
+	if cfg.TargetSchemaPattern != "tenant_%" {
+		t.Errorf("expected TargetSchemaPattern tenant_%%, got %s", cfg.TargetSchemaPattern)
 	}
 	if !cfg.AllowDrop {
 		t.Errorf("expected AllowDrop true")

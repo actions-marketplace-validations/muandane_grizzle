@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -1420,4 +1421,40 @@ func sortedManagedTableNames(s *schema.Schema) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// DiscoverSchemas queries pg_namespace for schemas matching a LIKE pattern,
+// excluding system schemas (pg_*, information_schema, and _grizzle*).
+// The returned schema names are deduplicated and sorted deterministically.
+func DiscoverSchemas(ctx context.Context, dbtx dialect.DBTX, pattern string) ([]string, error) {
+	if dbtx == nil {
+		return nil, fmt.Errorf("grizzle: database connection is nil")
+	}
+	const q = `
+SELECT nspname FROM pg_namespace
+WHERE nspname LIKE $1
+  AND nspname NOT LIKE 'pg_%'
+  AND nspname != 'information_schema'
+  AND nspname NOT LIKE '_grizzle%'
+ORDER BY nspname ASC;`
+
+	rows, err := dbtx.QueryContext(ctx, q, pattern)
+	if err != nil {
+		return nil, fmt.Errorf("discovering schemas with pattern %q: %w", pattern, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var schemas []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("scanning discovered schema name: %w", err)
+		}
+		schemas = append(schemas, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating discovered schemas: %w", err)
+	}
+	slices.Sort(schemas)
+	return slices.Compact(schemas), nil
 }

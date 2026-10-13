@@ -19,20 +19,21 @@ type LintConfig struct {
 
 // Config represents project-level configuration for Grizzle.
 type Config struct {
-	DSN           string     `json:"dsn"`
-	DevURL        string     `json:"dev_url"`
-	Schema        string     `json:"schema"`
-	Dialect       string     `json:"dialect"`
-	TargetSchema  string     `json:"target_schema"`
-	AllowDrop     bool       `json:"allow_drop"`
-	Roles         string     `json:"roles"`
-	Catalog       string     `json:"catalog"`
-	Seed          string     `json:"seed"`
-	ShadowSchema  string     `json:"shadow_schema"`
-	AcceptHazards []string   `json:"accept_hazards"`
-	BeforeSync    string     `json:"before_sync"`
-	AfterSync     string     `json:"after_sync"`
-	Lint          LintConfig `json:"lint"`
+	DSN                 string     `json:"dsn"`
+	DevURL              string     `json:"dev_url"`
+	Schema              string     `json:"schema"`
+	Dialect             string     `json:"dialect"`
+	TargetSchema        string     `json:"target_schema"`
+	TargetSchemaPattern string     `json:"target_schema_pattern"`
+	AllowDrop           bool       `json:"allow_drop"`
+	Roles               string     `json:"roles"`
+	Catalog             string     `json:"catalog"`
+	Seed                string     `json:"seed"`
+	ShadowSchema        string     `json:"shadow_schema"`
+	AcceptHazards       []string   `json:"accept_hazards"`
+	BeforeSync          string     `json:"before_sync"`
+	AfterSync           string     `json:"after_sync"`
+	Lint                LintConfig `json:"lint"`
 }
 
 // FindConfigFile discovers a configuration file in the working directory or uses explicit path.
@@ -165,6 +166,8 @@ func parseYAML(content string, cfg *Config) error {
 			cfg.Dialect = v
 		case "target_schema":
 			cfg.TargetSchema = v
+		case "target_schema_pattern", "schema_pattern":
+			cfg.TargetSchemaPattern = v
 		case "allow_drop":
 			b, _ := strconv.ParseBool(v)
 			cfg.AllowDrop = b

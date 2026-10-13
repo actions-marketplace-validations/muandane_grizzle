@@ -202,3 +202,29 @@ func TestRenameFlags_RejectsInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestCLI_SchemaPatternFlags(t *testing.T) {
+	tmpDir := t.TempDir()
+	schemaFile := filepath.Join(tmpDir, "schema.sql")
+	if err := os.WriteFile(schemaFile, []byte("CREATE TABLE items (id INT);"), 0600); err != nil {
+		t.Fatalf("writing schema file: %v", err)
+	}
+
+	// 1. TargetSchemaPattern with SQLite must fail (exit 1)
+	code := run([]string{"plan", "--dsn", "sqlite::memory:", "--schema", schemaFile, "--target-schema-pattern", "tenant_%"})
+	if code != 1 {
+		t.Fatalf("expected exit 1 for target-schema-pattern on SQLite, got %d", code)
+	}
+
+	// 2. Both --target-schema and --target-schema-pattern must fail (exit 1)
+	code = run([]string{"plan", "--dsn", "postgres://user:pass@localhost:5432/db", "--schema", schemaFile, "--target-schema", "public", "--target-schema-pattern", "tenant_%"})
+	if code != 1 {
+		t.Fatalf("expected exit 1 when both target-schema and target-schema-pattern provided, got %d", code)
+	}
+
+	// 3. Alias --schema-pattern is accepted by flag parsing (fails validation when mixed with target-schema)
+	code = run([]string{"plan", "--dsn", "postgres://user:pass@localhost:5432/db", "--schema", schemaFile, "--target-schema", "public", "--schema-pattern", "tenant_%"})
+	if code != 1 {
+		t.Fatalf("expected exit 1 when both target-schema and schema-pattern alias provided, got %d", code)
+	}
+}

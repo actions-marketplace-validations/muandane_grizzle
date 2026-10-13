@@ -335,7 +335,23 @@ func prepareOptions(ctx context.Context, db *sql.DB, opts *Options) error {
 		}
 	case DialectPostgres:
 		opts.LockNamespace = cmp.Or(opts.LockNamespace, "grizzle")
-		if len(opts.TargetSchemas) > 0 {
+		if opts.TargetSchemaPattern != "" {
+			if len(opts.TargetSchemas) > 0 || opts.TargetSchema != "" {
+				return fmt.Errorf("%w: cannot specify both TargetSchemaPattern and TargetSchema/TargetSchemas", ErrInvalidOptions)
+			}
+			if db == nil {
+				return fmt.Errorf("%w: database connection required to discover schemas with TargetSchemaPattern", ErrInvalidOptions)
+			}
+			schemas, err := postgres.DiscoverSchemas(ctx, db, opts.TargetSchemaPattern)
+			if err != nil {
+				return err
+			}
+			if len(schemas) == 0 {
+				return fmt.Errorf("%w %q", ErrNoMatchingSchemas, opts.TargetSchemaPattern)
+			}
+			opts.TargetSchemas = schemas
+			opts.TargetSchema = schemas[0]
+		} else if len(opts.TargetSchemas) > 0 {
 			slices.Sort(opts.TargetSchemas)
 			opts.TargetSchemas = slices.Compact(opts.TargetSchemas)
 			if opts.TargetSchema == "" {

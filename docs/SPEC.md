@@ -58,6 +58,11 @@ type Options struct {
     // For SQLite, entries other than "main" are ATTACH DATABASE names listed in SQLiteAttach.
     TargetSchemas []string
 
+    // TargetSchemaPattern specifies a LIKE-style pattern to discover target PostgreSQL schemas
+    // dynamically from pg_namespace (e.g. "tenant_%"). Discovered schemas are sorted deterministically,
+    // exclude system schemas (pg_*, information_schema, _grizzle*), and populate TargetSchemas.
+    TargetSchemaPattern string
+
     // SQLiteAttach maps ATTACH DATABASE schema names to filesystem paths.
     // Every TargetSchemas entry other than "main" must appear here; "main" is
     // the primary database already open and must not be listed. Unknown keys,

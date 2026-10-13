@@ -41,6 +41,7 @@ func TestOptions_FunctionalOptions(t *testing.T) {
 		grizzle.WithRenames(map[string]string{"users.legacy": "modern"}),
 		grizzle.WithExpandContract(true),
 		grizzle.WithBackfill(backfillFn),
+		grizzle.WithTargetSchemaPattern("tenant_%"),
 	}
 
 	for _, opt := range applyOptions {
@@ -94,6 +95,9 @@ func TestOptions_FunctionalOptions(t *testing.T) {
 	}
 	if opts.Backfill == nil {
 		t.Errorf("backfill not set")
+	}
+	if opts.TargetSchemaPattern != "tenant_%" {
+		t.Errorf("target schema pattern not set, got %q", opts.TargetSchemaPattern)
 	}
 }
 
@@ -149,6 +153,38 @@ func TestOptions_Validate(t *testing.T) {
 	}
 	if err := o6.Validate(); !errors.Is(err, grizzle.ErrInvalidOptions) {
 		t.Errorf("malformed extracted role statement should be invalid options, got: %v", err)
+	}
+
+	// TargetSchemaPattern on SQLite must fail
+	o7 := grizzle.Options{
+		SchemaSQL:           "CREATE TABLE t (id INT);",
+		Dialect:             grizzle.DialectSQLite,
+		TargetSchemaPattern: "tenant_%",
+	}
+	if err := o7.Validate(); !errors.Is(err, grizzle.ErrInvalidOptions) {
+		t.Errorf("expected ErrInvalidOptions for TargetSchemaPattern on SQLite, got: %v", err)
+	}
+
+	// TargetSchemaPattern with TargetSchemas must fail
+	o8 := grizzle.Options{
+		SchemaSQL:           "CREATE TABLE t (id INT);",
+		Dialect:             grizzle.DialectPostgres,
+		TargetSchemaPattern: "tenant_%",
+		TargetSchemas:       []string{"tenant_1"},
+	}
+	if err := o8.Validate(); !errors.Is(err, grizzle.ErrInvalidOptions) {
+		t.Errorf("expected ErrInvalidOptions for TargetSchemaPattern with TargetSchemas, got: %v", err)
+	}
+
+	// TargetSchemaPattern with TargetSchema must fail
+	o9 := grizzle.Options{
+		SchemaSQL:           "CREATE TABLE t (id INT);",
+		Dialect:             grizzle.DialectPostgres,
+		TargetSchemaPattern: "tenant_%",
+		TargetSchema:        "tenant_1",
+	}
+	if err := o9.Validate(); !errors.Is(err, grizzle.ErrInvalidOptions) {
+		t.Errorf("expected ErrInvalidOptions for TargetSchemaPattern with TargetSchema, got: %v", err)
 	}
 }
 
