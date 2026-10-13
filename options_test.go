@@ -42,6 +42,7 @@ func TestOptions_FunctionalOptions(t *testing.T) {
 		grizzle.WithExpandContract(true),
 		grizzle.WithBackfill(backfillFn),
 		grizzle.WithTargetSchemaPattern("tenant_%"),
+		grizzle.WithFailOnContention(true),
 	}
 
 	for _, opt := range applyOptions {
@@ -98,6 +99,9 @@ func TestOptions_FunctionalOptions(t *testing.T) {
 	}
 	if opts.TargetSchemaPattern != "tenant_%" {
 		t.Errorf("target schema pattern not set, got %q", opts.TargetSchemaPattern)
+	}
+	if !opts.FailOnContention {
+		t.Errorf("fail on contention not set")
 	}
 }
 
@@ -185,6 +189,16 @@ func TestOptions_Validate(t *testing.T) {
 	}
 	if err := o9.Validate(); !errors.Is(err, grizzle.ErrInvalidOptions) {
 		t.Errorf("expected ErrInvalidOptions for TargetSchemaPattern with TargetSchema, got: %v", err)
+	}
+
+	// FailOnContention on SQLite must fail
+	o10 := grizzle.Options{
+		SchemaSQL:        "CREATE TABLE t (id INT);",
+		Dialect:          grizzle.DialectSQLite,
+		FailOnContention: true,
+	}
+	if err := o10.Validate(); !errors.Is(err, grizzle.ErrInvalidOptions) {
+		t.Errorf("expected ErrInvalidOptions for FailOnContention on SQLite, got: %v", err)
 	}
 }
 

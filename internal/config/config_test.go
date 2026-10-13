@@ -20,6 +20,7 @@ roles: "db/roles.sql"
 seed: "db/seed.sql"
 before_sync: "db/before.sql"
 after_sync: "db/after.sql"
+fail_on_contention: true
 accept_hazards:
   - DROP_TABLE
   - DROP_COLUMN
@@ -58,6 +59,9 @@ lint:
 	}
 	if cfg.BeforeSync != "db/before.sql" {
 		t.Errorf("expected BeforeSync, got %s", cfg.BeforeSync)
+	}
+	if !cfg.FailOnContention {
+		t.Errorf("expected FailOnContention true")
 	}
 	if len(cfg.AcceptHazards) != 2 || cfg.AcceptHazards[0] != "DROP_TABLE" || cfg.AcceptHazards[1] != "DROP_COLUMN" {
 		t.Errorf("unexpected AcceptHazards: %+v", cfg.AcceptHazards)

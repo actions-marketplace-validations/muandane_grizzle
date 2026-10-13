@@ -145,32 +145,33 @@ func run(args []string) int {
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 
 	var (
-		dsnFlag        = fs.String("dsn", "", "Database DSN connection string")
-		devURLFlag     = fs.String("dev-url", "", "Dev database connection string used for shadow-schema compilation (overrides target DB)")
-		schemaFile     = fs.String("schema", "schema.sql", "Path to schema SQL file")
-		planFile       = fs.String("plan", "", "Path to plan JSON file")
-		outFile        = fs.String("out", "", "Destination file or directory")
-		formatFlag     = fs.String("format", "sql", "Output/export format: sql, goose, atlas, migrate, or github")
-		allowDrop      = fs.Bool("allow-drop", false, "Permit destructive operations")
-		jsonOutput     = fs.Bool("json", false, "Output in JSON format")
-		githubOutput   = fs.Bool("github", false, "Emit GitHub Actions workflow annotations")
-		jsonLog        = fs.Bool("json-log", false, "Emit logs in structured JSON format")
-		expectedHash   = fs.String("expected-hash", "", "Expected plan approval hash")
-		versionFlag    = fs.String("version", version, "Version string for export headers")
-		templateFlag   = fs.String("template", "", "Project template: sqlc, stdlib, or sqlite")
-		dirFlag        = fs.String("dir", ".", "Destination directory for init")
-		forceFlag      = fs.Bool("force", false, "Overwrite existing files during init, or force baseline")
-		failOnWarn     = fs.Bool("fail-on-warning", false, "Fail lint when warnings are reported")
-		dryRunFlag     = fs.Bool("dry-run", false, "Verify planned DDL against live data without persisting changes (apply)")
-		seedFile       = fs.String("seed", "", "Path to seed SQL file (seed)")
-		rolesFile      = fs.String("roles", "", "Path to roles SQL file (plan/apply/check): CREATE ROLE and GRANT statements diffed against live ACLs")
-		catalogFile    = fs.String("catalog", "", "Path to catalog SQL file (plan/apply/check): CREATE PUBLICATION and CREATE EVENT TRIGGER statements diffed against live catalogs")
-		targetSchema   = fs.String("target-schema", "", "Target database schema name")
-		limitFlag      = fs.Int("limit", 20, "Maximum number of history records to list (history)")
-		noteFlag       = fs.String("note", "", "Operator note for baseline or repair")
-		configFlag     = fs.String("config", "", "Path to grizzle.yaml or grizzle.json configuration file")
-		beforeSyncFlag = fs.String("before-sync", "", "SQL script or file to execute immediately before migration")
-		afterSyncFlag  = fs.String("after-sync", "", "SQL script or file to execute immediately after migration")
+		dsnFlag          = fs.String("dsn", "", "Database DSN connection string")
+		devURLFlag       = fs.String("dev-url", "", "Dev database connection string used for shadow-schema compilation (overrides target DB)")
+		schemaFile       = fs.String("schema", "schema.sql", "Path to schema SQL file")
+		planFile         = fs.String("plan", "", "Path to plan JSON file")
+		outFile          = fs.String("out", "", "Destination file or directory")
+		formatFlag       = fs.String("format", "sql", "Output/export format: sql, goose, atlas, migrate, or github")
+		allowDrop        = fs.Bool("allow-drop", false, "Permit destructive operations")
+		jsonOutput       = fs.Bool("json", false, "Output in JSON format")
+		githubOutput     = fs.Bool("github", false, "Emit GitHub Actions workflow annotations")
+		jsonLog          = fs.Bool("json-log", false, "Emit logs in structured JSON format")
+		expectedHash     = fs.String("expected-hash", "", "Expected plan approval hash")
+		versionFlag      = fs.String("version", version, "Version string for export headers")
+		templateFlag     = fs.String("template", "", "Project template: sqlc, stdlib, or sqlite")
+		dirFlag          = fs.String("dir", ".", "Destination directory for init")
+		forceFlag        = fs.Bool("force", false, "Overwrite existing files during init, or force baseline")
+		failOnWarn       = fs.Bool("fail-on-warning", false, "Fail lint when warnings are reported")
+		dryRunFlag       = fs.Bool("dry-run", false, "Verify planned DDL against live data without persisting changes (apply)")
+		seedFile         = fs.String("seed", "", "Path to seed SQL file (seed)")
+		rolesFile        = fs.String("roles", "", "Path to roles SQL file (plan/apply/check): CREATE ROLE and GRANT statements diffed against live ACLs")
+		catalogFile      = fs.String("catalog", "", "Path to catalog SQL file (plan/apply/check): CREATE PUBLICATION and CREATE EVENT TRIGGER statements diffed against live catalogs")
+		targetSchema     = fs.String("target-schema", "", "Target database schema name")
+		limitFlag        = fs.Int("limit", 20, "Maximum number of history records to list (history)")
+		noteFlag         = fs.String("note", "", "Operator note for baseline or repair")
+		configFlag       = fs.String("config", "", "Path to grizzle.yaml or grizzle.json configuration file")
+		beforeSyncFlag   = fs.String("before-sync", "", "SQL script or file to execute immediately before migration")
+		afterSyncFlag    = fs.String("after-sync", "", "SQL script or file to execute immediately after migration")
+		failOnContention = fs.Bool("fail-on-contention", false, "Gate migration execution if lock contention is detected on target tables (default: advisory warning)")
 	)
 
 	var targetSchemaPattern string
@@ -239,6 +240,9 @@ func run(args []string) int {
 		if *afterSyncFlag == "" && cfg.AfterSync != "" {
 			*afterSyncFlag = cfg.AfterSync
 		}
+		if !*failOnContention && cfg.FailOnContention {
+			*failOnContention = true
+		}
 		if !*failOnWarn && cfg.Lint.FailOnWarning {
 			*failOnWarn = true
 		}
@@ -295,7 +299,7 @@ func run(args []string) int {
 		if !ok {
 			return 1
 		}
-		return runApply(ctx, dsn, devURL, *planFile, *schemaFile, rolesSQL, catalogSQL, *expectedHash, *allowDrop, hazards, *dryRunFlag, renames, *expandContract, backfillHook, *targetSchema, targetSchemaPattern, beforeHook, afterHook)
+		return runApply(ctx, dsn, devURL, *planFile, *schemaFile, rolesSQL, catalogSQL, *expectedHash, *allowDrop, hazards, *dryRunFlag, renames, *expandContract, backfillHook, *targetSchema, targetSchemaPattern, *failOnContention, beforeHook, afterHook)
 	case "check":
 		rolesSQL, ok := readRolesFile(*rolesFile)
 		if !ok {
@@ -487,7 +491,7 @@ func resolveSyncHook(scriptOrPath string) (grizzle.SyncHook, error) {
 	}, nil
 }
 
-func runApply(ctx context.Context, dsn, devURL, planFile, schemaFile, rolesSQL, catalogSQL, expectedHash string, allowDrop bool, hazards []string, dryRun bool, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc, targetSchema, targetSchemaPattern string, hooks ...grizzle.SyncHook) int {
+func runApply(ctx context.Context, dsn, devURL, planFile, schemaFile, rolesSQL, catalogSQL, expectedHash string, allowDrop bool, hazards []string, dryRun bool, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc, targetSchema, targetSchemaPattern string, failOnContention bool, hooks ...grizzle.SyncHook) int {
 	var beforeSync, afterSync grizzle.SyncHook
 	if len(hooks) > 0 {
 		beforeSync = hooks[0]
@@ -536,12 +540,13 @@ func runApply(ctx context.Context, dsn, devURL, planFile, schemaFile, rolesSQL, 
 	}
 
 	applyOpts := grizzle.ApplyOpts{
-		ExpectedHash:   expHash,
-		AcceptHazards:  acceptedCodes,
-		Backfill:       backfill,
-		BeforeSync:     beforeSync,
-		AfterSync:      afterSync,
-		DevDatabaseURL: devURL,
+		ExpectedHash:     expHash,
+		AcceptHazards:    acceptedCodes,
+		Backfill:         backfill,
+		BeforeSync:       beforeSync,
+		AfterSync:        afterSync,
+		DevDatabaseURL:   devURL,
+		FailOnContention: failOnContention,
 	}
 
 	if err := grizzle.Apply(ctx, db, p, applyOpts); err != nil {
@@ -553,6 +558,12 @@ func runApply(ctx context.Context, dsn, devURL, planFile, schemaFile, rolesSQL, 
 		if errors.Is(err, grizzle.ErrHazardBlocked) || errors.As(err, &hazardErr) {
 			slog.Error("migration blocked by unaccepted critical hazard", "err", err)
 			return 2
+		}
+		var contentionErr *grizzle.LockContentionError
+		if errors.Is(err, grizzle.ErrLockContention) || errors.As(err, &contentionErr) {
+			slog.Error("migration blocked by lock contention on target table", "err", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
 		}
 		slog.Error("applying plan", "err", err)
 		return 1

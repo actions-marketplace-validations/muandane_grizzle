@@ -66,6 +66,11 @@ type PostgresExecConfig struct {
 	AfterSync            SyncHook
 	BeforeStep           StepHook
 	AfterStep            StepHook
+	// FailOnContention gates DDL execution on PostgreSQL: if concurrent sessions hold conflicting
+	// locks on target tables, retry with backoff up to LockTimeout; if contention persists, abort
+	// with ErrLockContention instead of proceeding. When false (default), lock contention is advisory
+	// and logs a warning before proceeding.
+	FailOnContention bool
 	// DryRunLockTimeout bounds lock waits for dry-run verification
 	// (defaults to DefaultDryRunLockTimeout of 2s).
 	DryRunLockTimeout time.Duration
@@ -728,6 +733,12 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 
 	// 6. Cleanup shadow schema before live execution
 	if err := postgres.DropShadowSchemas(ctx, conn, shadowSchemas); err != nil {
+		return 0, err
+	}
+
+	// 6b. Lock contention pre-flight: check for conflicting holders on target tables before DDL execution
+	lockTables := CollectTablesNeedingStrongLocks(primarySchema, steps)
+	if err := postgres.PreflightLockContention(ctx, conn, lockTables, cfg.LockTimeout, cfg.FailOnContention, logger); err != nil {
 		return 0, err
 	}
 
@@ -1510,6 +1521,12 @@ func applyPostgresOnce(ctx context.Context, db *sql.DB, p *plan.Plan, cfg Postgr
 				_ = history.RecordProgress(fbCtx, histConn, "postgres", primarySchema, p, status, failedStep, execErr, time.Since(start))
 			}
 		}
+	}
+
+	// Lock contention pre-flight: check for conflicting holders on target tables before DDL execution
+	lockTables := CollectTablesNeedingStrongLocks(primarySchema, p.Steps)
+	if err := postgres.PreflightLockContention(ctx, conn, lockTables, cfg.LockTimeout, cfg.FailOnContention, logger); err != nil {
+		return 0, err
 	}
 
 	for groupIdx, group := range groups {

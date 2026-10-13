@@ -20,8 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Dynamic discovery of PostgreSQL schemas via `pg_namespace` matching LIKE patterns (e.g. `tenant_%`), sorted in deterministic ascending order.
   - Automatic exclusion of PostgreSQL system schemas (`pg_%`, `information_schema`) and Grizzle shadow/internal schemas (`_grizzle%`).
   - Plan drift detection: discovered schema list populates `Plan.TargetSchemas` and participates in `Plan.Hash()`, detecting schema additions and removals.
-  - Preserves full backward compatibility with explicit `Options.TargetSchema` and `Options.TargetSchemas`.
-  - CLI flag support via `--target-schema-pattern` and `--schema-pattern`, configuration file support (`target_schema_pattern` / `schema_pattern`), and `ErrNoMatchingSchemas` when zero schemas match.
+- **Lock Contention Pre-Flight** (`Options.FailOnContention` / `--fail-on-contention` / `LockContentionError`):
+  - Pre-flight lock contention inspection before executing DDL steps requiring strong table locks (`AccessExclusiveLock`, `ShareUpdateExclusiveLock`, etc.), querying `pg_locks` joined with `pg_stat_activity` on target tables while filtering out the current backend PID.
+  - Advisory mode by default: logs detailed warnings identifying conflicting PIDs, usernames, applications, lock modes, running queries, and durations without gating execution.
+  - Fail-on-contention gating via `--fail-on-contention` / `Options.FailOnContention`: retries with exponential backoff up to `LockTimeout`, aborting execution with structured `LockContentionError` (wrapping `ErrLockContention`) if contention does not clear within the timeout.
+  - Documented racy nature: pre-flight checks are point-in-time snapshots and must be paired with PostgreSQL `lock_timeout` (`Options.LockTimeout`) to bound concurrent contention races.
+  - Zero `Plan.Hash()` impact; 100% backward compatible with existing stored plans.
 
 ## [v0.1.0] - 2026-10-13
 

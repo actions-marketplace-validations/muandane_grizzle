@@ -37,6 +37,9 @@ var (
 	// ErrLockTimeout is returned when an advisory lock cannot be acquired within the configured lock timeout.
 	ErrLockTimeout = plan.ErrLockTimeout
 
+	// ErrLockContention is returned when conflicting locks are held on target tables during pre-flight check.
+	ErrLockContention = plan.ErrLockContention
+
 	// ErrInvalidOptions is returned when provided Options fail validation.
 	ErrInvalidOptions = plan.ErrInvalidOptions
 
@@ -91,3 +94,9 @@ type DestructiveViolationError = plan.DestructiveViolationError
 
 // DriftError reports unapplied differences between the live schema and the desired schema.
 type DriftError = plan.DriftError
+
+// LockConflict describes a concurrent database session holding a lock on a target table.
+type LockConflict = plan.LockConflict
+
+// LockContentionError contains details about conflicting lock holders detected during pre-flight check.
+type LockContentionError = plan.LockContentionError

@@ -228,3 +228,17 @@ func TestCLI_SchemaPatternFlags(t *testing.T) {
 		t.Fatalf("expected exit 1 when both target-schema and schema-pattern alias provided, got %d", code)
 	}
 }
+
+func TestCLI_FailOnContentionFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	schemaFile := filepath.Join(tmpDir, "schema.sql")
+	if err := os.WriteFile(schemaFile, []byte("CREATE TABLE items (id INT);"), 0600); err != nil {
+		t.Fatalf("writing schema file: %v", err)
+	}
+
+	// 1. FailOnContention with SQLite must fail (exit 1)
+	code := run([]string{"apply", "--dsn", "sqlite::memory:", "--schema", schemaFile, "--fail-on-contention"})
+	if code != 1 {
+		t.Fatalf("expected exit 1 for fail-on-contention on SQLite, got %d", code)
+	}
+}

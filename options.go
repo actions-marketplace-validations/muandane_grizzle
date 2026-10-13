@@ -264,6 +264,16 @@ type Options struct {
 	// PostgreSQL only; ignored on SQLite.
 	DevDatabaseURL string
 
+	// FailOnContention gates DDL execution on PostgreSQL: if concurrent sessions hold conflicting
+	// locks on target tables, retry with backoff up to LockTimeout; if contention persists, abort
+	// with ErrLockContention instead of proceeding. When false (default), lock contention is advisory
+	// and logs a warning before proceeding.
+	//
+	// NOTE: Pre-flight lock inspection is inherently racy: concurrent transactions may acquire
+	// locks between the pre-flight check and subsequent DDL execution. Always configure LockTimeout
+	// alongside FailOnContention to bound wait duration if a race occurs.
+	FailOnContention bool
+
 	// Logger accepts a structured logger (*slog.Logger) for migration events.
 	Logger *slog.Logger
 
@@ -467,6 +477,15 @@ func WithDevDatabaseURL(url string) Option {
 	}
 }
 
+// WithFailOnContention configures whether lock contention pre-flight gates migration execution.
+// When true, conflicting locks on target tables trigger backoff retries up to LockTimeout,
+// and abort with ErrLockContention if contention does not clear.
+func WithFailOnContention(fail bool) Option {
+	return func(o *Options) {
+		o.FailOnContention = fail
+	}
+}
+
 // Validate is the canonical pure validation entry point for Options.
 // It checks SchemaSQL, strict scope, dialect value, target/shadow identifiers,
 // timeout and retry bounds, SQLite rebuild parameters, and multi-schema SQLite
@@ -507,6 +526,9 @@ func (o *Options) Validate() error {
 
 	switch o.Dialect {
 	case DialectSQLite:
+		if o.FailOnContention {
+			return fmt.Errorf("%w: FailOnContention requires PostgreSQL; lock contention pre-flight is not supported on SQLite", ErrInvalidOptions)
+		}
 		if o.TargetSchemaPattern != "" {
 			return fmt.Errorf("%w: TargetSchemaPattern requires PostgreSQL; multi-tenant schema patterns are not supported on SQLite", ErrInvalidOptions)
 		}

@@ -174,6 +174,14 @@ type Options struct {
     // AfterStep executes immediately after each successful plan step.
     AfterStep StepHook
 
+    // FailOnContention gates execution if lock contention is detected on target tables
+    // before running DDL requiring strong locks (PostgreSQL only). When false (default),
+    // contention is logged as a warning (advisory mode). When true, Grizzle retries with
+    // backoff up to LockTimeout, aborting with ErrLockContention if contention persists.
+    // Note: this pre-flight check is inherently racy (point-in-time snapshot) and must
+    // be accompanied by lock_timeout enforcement.
+    FailOnContention bool
+
     // DryRun outputs planned statements without executing them.
     DryRun bool
 
@@ -601,6 +609,7 @@ var (
     ErrPlanDrift          = errors.New("grizzle: plan drifted from approved state")
     ErrDrift              = errors.New("grizzle: live database schema has drifted from desired schema")
     ErrLockTimeout             = errors.New("grizzle: lock acquisition timed out")
+    ErrLockContention          = errors.New("grizzle: lock contention detected on target table")
     ErrInvalidOptions          = errors.New("grizzle: invalid options")
     ErrStrictScope             = errors.New("grizzle: strict scope requires non-empty IncludeTables")
     ErrPartitionConversion     = errors.New("grizzle: in-place conversion between regular and partitioned table is unsupported")

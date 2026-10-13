@@ -33,6 +33,7 @@ type Config struct {
 	AcceptHazards       []string   `json:"accept_hazards"`
 	BeforeSync          string     `json:"before_sync"`
 	AfterSync           string     `json:"after_sync"`
+	FailOnContention    bool       `json:"fail_on_contention"`
 	Lint                LintConfig `json:"lint"`
 }
 
@@ -183,6 +184,9 @@ func parseYAML(content string, cfg *Config) error {
 			cfg.BeforeSync = v
 		case "after_sync":
 			cfg.AfterSync = v
+		case "fail_on_contention":
+			b, _ := strconv.ParseBool(v)
+			cfg.FailOnContention = b
 		}
 	}
 

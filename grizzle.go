@@ -460,6 +460,7 @@ func Sync(ctx context.Context, db *sql.DB, opts Options) error {
 			BeforeStep:           opts.BeforeStep,
 			AfterStep:            opts.AfterStep,
 			DevDB:                devDB,
+			FailOnContention:     opts.FailOnContention,
 		})
 	}
 	if syncErr != nil {
@@ -621,6 +622,12 @@ type ApplyOpts struct {
 	// used for shadow schema compilation during plan verification.
 	DevDatabaseURL string
 
+	// FailOnContention gates DDL execution on PostgreSQL: if concurrent sessions hold conflicting
+	// locks on target tables, retry with backoff up to LockTimeout; if contention persists, abort
+	// with ErrLockContention instead of proceeding. When false (default), lock contention is advisory
+	// and logs a warning before proceeding.
+	FailOnContention bool
+
 	// Logger receives structured migration logs during Apply (defaults to no logging).
 	// The plan artifact cannot carry a logger, so it is supplied here.
 	Logger *slog.Logger
@@ -681,6 +688,7 @@ func optionsFromPlan(p *Plan, opts ApplyOpts) Options {
 		NonConcurrentIndexes:     p.NonConcurrentIndexes,
 		ExpectedHash:             opts.ExpectedHash,
 		DevDatabaseURL:           opts.DevDatabaseURL,
+		FailOnContention:         opts.FailOnContention,
 		Logger:                   opts.Logger,
 		Tracer:                   opts.Tracer,
 	}
@@ -758,6 +766,7 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 			Tracer:               syncOpts.Tracer,
 			DryRun:               syncOpts.DryRun,
 			Backfill:             toExecBackfill(opts.Backfill),
+			FailOnContention:     syncOpts.FailOnContention,
 		})
 	}
 
@@ -833,6 +842,7 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 			AfterSync:            opts.AfterSync,
 			BeforeStep:           opts.BeforeStep,
 			AfterStep:            opts.AfterStep,
+			FailOnContention:     opts.FailOnContention,
 		})
 	default:
 		return fmt.Errorf("grizzle: unsupported dialect %q", dialect)

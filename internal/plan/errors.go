@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 var (
@@ -39,6 +40,9 @@ var (
 
 	// ErrLockTimeout is returned when an advisory lock cannot be acquired within the configured lock timeout.
 	ErrLockTimeout = errors.New("grizzle: lock acquisition timeout")
+
+	// ErrLockContention is returned when conflicting locks are held on target tables during pre-flight check.
+	ErrLockContention = errors.New("grizzle: lock contention detected on target table")
 
 	// ErrInvalidOptions is returned when provided Options fail validation.
 	ErrInvalidOptions = errors.New("grizzle: invalid options")
@@ -153,4 +157,45 @@ func (e *DriftError) Is(target error) bool {
 
 func (e *DriftError) Unwrap() error {
 	return ErrDrift
+}
+
+// LockConflict describes a concurrent database session holding a lock on a target table.
+type LockConflict struct {
+	Schema          string        `json:"schema"`
+	Table           string        `json:"table"`
+	PID             int           `json:"pid"`
+	Username        string        `json:"username"`
+	ApplicationName string        `json:"application_name"`
+	State           string        `json:"state"`
+	Query           string        `json:"query"`
+	Duration        time.Duration `json:"duration"`
+	LockMode        string        `json:"lock_mode"`
+}
+
+// LockContentionError contains details about conflicting lock holders detected during pre-flight check.
+type LockContentionError struct {
+	Conflicts []LockConflict
+}
+
+func (e *LockContentionError) Error() string {
+	if len(e.Conflicts) == 0 {
+		return "grizzle: lock contention detected on target table"
+	}
+	c := e.Conflicts[0]
+	if len(e.Conflicts) == 1 {
+		return fmt.Sprintf("grizzle: lock contention on %s.%s held by PID %d (user: %s, mode: %s, query: %q, duration: %s)",
+			c.Schema, c.Table, c.PID, c.Username, c.LockMode, c.Query, c.Duration)
+	}
+	return fmt.Sprintf("grizzle: %d lock conflict(s) detected on target tables (first: %s.%s held by PID %d, mode: %s, query: %q)",
+		len(e.Conflicts), c.Schema, c.Table, c.PID, c.LockMode, c.Query)
+}
+
+// Is reports whether target matches ErrLockContention.
+func (e *LockContentionError) Is(target error) bool {
+	return target == ErrLockContention
+}
+
+// Unwrap returns the underlying ErrLockContention sentinel error.
+func (e *LockContentionError) Unwrap() error {
+	return ErrLockContention
 }
