@@ -73,7 +73,7 @@ var (
 
 	// ErrPriorFailureBlocked is returned by Sync when the latest recorded migration
 	// in grizzle_history is in a 'partial' or 'failed' state and AllowResumePartial is false.
-	ErrPriorFailureBlocked = errors.New("grizzle: schema migration blocked by prior failed or partial migration; resolve previous failure before syncing or enable AllowResumePartial")
+	ErrPriorFailureBlocked = errors.New("grizzle: schema migration blocked by prior failed or partial migration; resolve previous failure with 'grizzle repair' or enable WithAllowResumePartial")
 
 	// ErrNoFailedMigration is returned when attempting to resolve or repair a failed migration,
 	// but no prior run is in a partial or failed state.
