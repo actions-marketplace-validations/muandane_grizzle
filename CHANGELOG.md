@@ -18,7 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `grizzle.yaml` and `grizzle.json`: Zero-dependency configuration file loader with automatic file discovery (`grizzle.yaml`, `.grizzle.yaml`, `grizzle.json`) and CLI flag fallback support.
   - Inline lint suppression directives: `-- grizzle:lint-ignore <rules>` for statement/table scope, and `-- grizzle:lint-disable <rules>` for global file-level suppression.
   - CLI pre/post migration hooks: `--before-sync` and `--after-sync` flags accepting SQL files or inline statements.
-  - Mode Presets: `grizzle.Development(schemaSQL)` (allows drops, fast synchronous index creation, allows resuming partial migrations) and `grizzle.Production(schemaSQL)` (zero-data-loss default, online concurrent index creation, fail-closed prior-failure gating).
+- **In-Process Boot Auto-Migration Engine Hardening** (`#52`):
+  - Prior-failure fail-closed gating (`ErrPriorFailureBlocked`): `Sync()` inspects `grizzle_history` under advisory lock and aborts if the latest migration state is `partial` or `failed`. Added `Options.AllowResumePartial` and `WithAllowResumePartial()` for operator bypass.
+  - Connection pool starvation safety: reuses held dedicated connection when recording failure history to prevent deadlocks on single-connection pools (`MaxOpenConns = 1`).
+  - Explicit transaction isolation: enforces `sql.LevelReadCommitted` across all DDL transactions to protect against non-default database isolation levels.
+  - Plan hash & tamper verification: added `Options.ExpectedHash` and `WithExpectedHash()` to verify plan hash integrity under lock before applying DDL.
+  - Hardening test suite & benchmark allocs: added `b.ReportAllocs()` across all benchmarks, cold-boot migration benchmark, and hardening tests (`TestHardening_PriorFailureBlocking`, `TestHardening_SingleConnectionPool`, `TestHardening_ExpectedHashEnforcement`).
 
 ## [v0.1.0-rc3] - 2026-10-12
 
