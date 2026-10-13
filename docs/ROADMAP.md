@@ -117,7 +117,7 @@ Ordered by expected impact; nothing here blocks the first release.
 - [x] **Declarative management surface expansion** — shipped (see "Managed surface expansion" below): extensions, RLS + policies, functions, triggers, and views/matviews are now first-class managed constructs.
 - [x] **SQLite declarative CHECK constraints** — named and inline CHECK constraints are parsed from `sqlite_schema.sql`, emitted on create/rebuild, and diffed (check drift triggers a rebuild; removals gated by `AllowDropCheck` + `DROP_CHECK`).
 - [x] **Domain CHECK management** — domains are managed end-to-end: base type/nullability/default diffed from `pg_type` + `pg_constraint` (`conrelid = 0`), CHECK drift via `ALTER DOMAIN ADD/DROP CONSTRAINT`, drops gated by `AllowDropDomain` + `DROP_DOMAIN`.
-- [x] **CLI backfill runner** — `--backfill copy` / `--backfill-file` on the existing `RunBackfill` loop when `--expand-contract` is set; `--backfill-batch` default 1000; single-column PK required.
+- [x] **CLI backfill runner** — `--backfill copy` / `--backfill-file` on the existing `RunBackfill` loop when `--expand-contract` is set; `--backfill-batch` default 1000; single-column and composite primary keys supported via keyset pagination.
 - [x] **Multi-schema SQLite** — `SQLiteAttach` + `TargetSchemas`; per-schema diff/rebuild; shadow uses `:memory:` ATTACH (cross-DB FKs not validated).
 - [x] **Stabilize Renames / ExpandContract / Backfill** — `Experimental:` markers removed; field shapes and `Plan.Hash()` inputs unchanged. No v1.0 tag in this slice.
 

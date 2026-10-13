@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Support compiling shadow schemas against an external development database instead of the live target database.
   - Actionable error guidance: when the target database user lacks `CREATE SCHEMA` privileges and no dev URL is provided, returns an explicit error naming `--dev-url` / `Options.DevDatabaseURL` and `GRANT CREATE ON DATABASE` with zero silent fallback.
   - CLI integration across `plan`, `apply`, `check`, `lint`, `export`, `status`, and `baseline` via `--dev-url` flag, `GRIZZLE_DEV_URL` / `DEV_DATABASE_URL` environment variables, and `dev_url` config property in `grizzle.yaml`.
+- **Composite Primary Key Keyset Backfill** (`internal/exec/backfill.go`):
+  - Keyset pagination with SQL row-value comparison `(pk1, ..., pkN) > ($1, ..., $N)` and tuple `IN` updates supporting $N$-column composite primary keys ($N \ge 1$) across PostgreSQL and SQLite.
+  - Index verification: requires and verifies that a database index exists whose leading columns match the primary key column order before keyset traversal begins.
+  - Mid-run resumption: seamlessly resumes backfill progression from partially-backfilled batches without skipping or duplicating rows.
+  - NULL-free guarantee documentation: primary key columns are constrained NOT NULL by relational database standards, eliminating SQL three-valued logic edge cases in row constructor comparisons.
 
 ## [v0.1.0] - 2026-10-13
 

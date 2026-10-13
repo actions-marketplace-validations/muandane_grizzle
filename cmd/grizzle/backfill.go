@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/muandane/grizzle"
+	"github.com/muandane/grizzle/internal/exec"
 )
 
 // backfillFlag is a custom flag.Value for --backfill with an optional argument.
@@ -135,101 +136,12 @@ func buildCopyBackfillSQLFirstBatch(dialect grizzle.Dialect, tableRef, pkCol, ol
 	}
 }
 
-func newCopyBackfillHook(dialect grizzle.Dialect, batch int) grizzle.BackfillFunc {
-	pkCache := map[string]string{}
-	lastPK := map[string]any{}
-	started := map[string]bool{}
-
-	return func(ctx context.Context, tx *sql.Tx, table, oldCol, newCol string) error {
-		pk, ok := pkCache[table]
-		if !ok {
-			var err error
-			pk, err = lookupSingleColumnPK(ctx, tx, dialect, table)
-			if err != nil {
-				return err
-			}
-			pkCache[table] = pk
-		}
-
-		tableRef := fmt.Sprintf("%q", table)
-		ids, err := selectBackfillBatch(ctx, tx, dialect, tableRef, pk, newCol, batch, started[table], lastPK[table])
-		if err != nil {
-			return err
-		}
-		if len(ids) == 0 {
-			return nil
-		}
-
-		if err := updateBackfillBatch(ctx, tx, dialect, tableRef, pk, oldCol, newCol, ids); err != nil {
-			return err
-		}
-		started[table] = true
-		lastPK[table] = ids[len(ids)-1]
-		return nil
+func newCopyBackfillHook(d grizzle.Dialect, batch int) grizzle.BackfillFunc {
+	execDialect := exec.DialectPostgres
+	if d == grizzle.DialectSQLite {
+		execDialect = exec.DialectSQLite
 	}
-}
-
-func selectBackfillBatch(ctx context.Context, tx *sql.Tx, dialect grizzle.Dialect, tableRef, pkCol, newCol string, batch int, hasCursor bool, last any) ([]any, error) {
-	var (
-		q    string
-		args []any
-	)
-	if !hasCursor {
-		switch dialect {
-		case grizzle.DialectPostgres:
-			q = fmt.Sprintf(`SELECT %q FROM %s WHERE %q IS NULL ORDER BY %q LIMIT $1`, pkCol, tableRef, newCol, pkCol)
-		default:
-			q = fmt.Sprintf(`SELECT %q FROM %s WHERE %q IS NULL ORDER BY %q LIMIT ?`, pkCol, tableRef, newCol, pkCol)
-		}
-		args = []any{batch}
-	} else {
-		switch dialect {
-		case grizzle.DialectPostgres:
-			q = fmt.Sprintf(`SELECT %q FROM %s WHERE %q IS NULL AND %q > $1 ORDER BY %q LIMIT $2`, pkCol, tableRef, newCol, pkCol, pkCol)
-		default:
-			q = fmt.Sprintf(`SELECT %q FROM %s WHERE %q IS NULL AND %q > ? ORDER BY %q LIMIT ?`, pkCol, tableRef, newCol, pkCol, pkCol)
-		}
-		args = []any{last, batch}
-	}
-
-	rows, err := tx.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("copy backfill select: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var ids []any
-	for rows.Next() {
-		var id any
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("copy backfill scan: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return ids, nil
-}
-
-func updateBackfillBatch(ctx context.Context, tx *sql.Tx, dialect grizzle.Dialect, tableRef, pkCol, oldCol, newCol string, ids []any) error {
-	placeholders := make([]string, len(ids))
-	for i := range ids {
-		if dialect == grizzle.DialectPostgres {
-			placeholders[i] = "$" + strconv.Itoa(i+1)
-		} else {
-			placeholders[i] = "?"
-		}
-	}
-	//nolint:gosec // G201: identifiers from rename map / PK lookup, quoted with %q; values bound
-	q := fmt.Sprintf(
-		`UPDATE %s SET %q = %q WHERE %q IN (%s)`,
-		tableRef, newCol, oldCol, pkCol, strings.Join(placeholders, ", "),
-	)
-	if _, err := tx.ExecContext(ctx, q, ids...); err != nil {
-		return fmt.Errorf("copy backfill update: %w", err)
-	}
-	return nil
+	return grizzle.BackfillFunc(exec.NewCopyBackfillHook(execDialect, batch))
 }
 
 func newFileBackfillHook(templateSQL string, batch int) grizzle.BackfillFunc {
