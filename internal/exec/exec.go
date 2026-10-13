@@ -525,6 +525,9 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 		if logger != nil {
 			logger.ErrorContext(ctx, "grizzle: lock acquisition failed", "schemas", targetSchemas, "lock_id", cfg.LockID, "error", err)
 		}
+		if errors.Is(err, plan.ErrTransactionPooling) {
+			return 0, err
+		}
 		return 0, fmt.Errorf("%w: %w", plan.ErrLockAcquisition, err)
 	}
 	defer releasePostgresConn(ctx, conn, func(relCtx context.Context) error {
@@ -1371,6 +1374,9 @@ func applyPostgresOnce(ctx context.Context, db *sql.DB, p *plan.Plan, cfg Postgr
 	if err != nil {
 		if logger != nil {
 			logger.ErrorContext(ctx, "grizzle: lock acquisition failed", "schemas", targetSchemas, "lock_id", cfg.LockID, "error", err)
+		}
+		if errors.Is(err, plan.ErrTransactionPooling) {
+			return 0, err
 		}
 		return 0, fmt.Errorf("%w: %w", plan.ErrLockAcquisition, err)
 	}

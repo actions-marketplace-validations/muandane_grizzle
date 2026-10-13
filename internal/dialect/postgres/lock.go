@@ -36,10 +36,50 @@ func AcquireAdvisoryLock(ctx context.Context, dbtx dialect.DBTX, lockID int64) e
 	return nil
 }
 
+// VerifySessionDedicated probes whether the connection preserves session state
+// across queries. Connection poolers operating in transaction pooling mode (such
+// as PgBouncer with pool_mode = transaction) reassign or reset (DISCARD ALL) the
+// underlying server connection between statements, which breaks session-level
+// advisory locks and leads to orphaned locks or hangs.
+func VerifySessionDedicated(ctx context.Context, dbtx dialect.DBTX) error {
+	const probeVal = "grizzle_session_active"
+	// Set custom GUC in session scope (is_local = false)
+	var setDummy string
+	err := dbtx.QueryRowContext(ctx, "SELECT set_config('grizzle.session_probe', $1, false);", probeVal).Scan(&setDummy)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return nil
+	}
+
+	var gotVal string
+	err = dbtx.QueryRowContext(ctx, "SELECT current_setting('grizzle.session_probe', true);").Scan(&gotVal)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return nil
+	}
+
+	// Clean up probe setting on best effort
+	var clearDummy string
+	_ = dbtx.QueryRowContext(ctx, "SELECT set_config('grizzle.session_probe', '', false);").Scan(&clearDummy)
+
+	if gotVal != probeVal {
+		return fmt.Errorf("%w: session state was not preserved across queries (expected %q, got %q); connect directly to PostgreSQL or configure PgBouncer in session pooling mode", plan.ErrTransactionPooling, probeVal, gotVal)
+	}
+	return nil
+}
+
 // AcquireSessionAdvisoryLock acquires a PostgreSQL session-level exclusive advisory lock on a dedicated connection.
 // It uses pg_try_advisory_lock in a non-blocking loop to avoid holding open server-side lock wait queues
 // that would cause PostgreSQL deadlock detection against concurrent non-transactional DDL such as CREATE INDEX CONCURRENTLY.
 func AcquireSessionAdvisoryLock(ctx context.Context, dbtx dialect.DBTX, lockID int64) error {
+	if err := VerifySessionDedicated(ctx, dbtx); err != nil {
+		return err
+	}
+
 	attempt := 0
 	for {
 		var acquired bool
@@ -74,6 +114,9 @@ func ReleaseSessionAdvisoryLock(ctx context.Context, dbtx dialect.DBTX, lockID i
 	if err != nil {
 		return fmt.Errorf("failed to release pg_advisory_unlock: %w", err)
 	}
+	if !released {
+		return fmt.Errorf("%w: advisory lock was not held by this connection (possible transaction-mode pooling or connection reuse)", plan.ErrTransactionPooling)
+	}
 	return nil
 }
 
@@ -86,6 +129,10 @@ func Hash32(s string) int32 {
 
 // AcquireSessionAdvisoryLock2 acquires a PostgreSQL session-level advisory lock using two 32-bit keys (namespace, key).
 func AcquireSessionAdvisoryLock2(ctx context.Context, dbtx dialect.DBTX, key1, key2 int32) error {
+	if err := VerifySessionDedicated(ctx, dbtx); err != nil {
+		return err
+	}
+
 	attempt := 0
 	for {
 		var acquired bool
@@ -119,6 +166,9 @@ func ReleaseSessionAdvisoryLock2(ctx context.Context, dbtx dialect.DBTX, key1, k
 	err := dbtx.QueryRowContext(ctx, "SELECT pg_advisory_unlock($1, $2);", key1, key2).Scan(&released)
 	if err != nil {
 		return fmt.Errorf("failed to release pg_advisory_unlock($1, $2): %w", err)
+	}
+	if !released {
+		return fmt.Errorf("%w: advisory lock was not held by this connection (possible transaction-mode pooling or connection reuse)", plan.ErrTransactionPooling)
 	}
 	return nil
 }
