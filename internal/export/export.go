@@ -20,6 +20,10 @@ const (
 	FormatGoose Format = "goose"
 	// FormatAtlas emits an Atlas-compatible SQL migration file.
 	FormatAtlas Format = "atlas"
+	// FormatMigrate emits golang-migrate compatible .up.sql and .down.sql migration files.
+	FormatMigrate Format = "migrate"
+	// FormatGolangMigrate is an alias for FormatMigrate.
+	FormatGolangMigrate Format = "golang-migrate"
 )
 
 // Artifact represents a generated migration file ready to be written to disk.
@@ -62,8 +66,20 @@ func Export(p *plan.Plan, format Format, version string, timestamp time.Time) ([
 			Content:  renderAtlas(p, version),
 		}}, nil
 
+	case FormatMigrate, FormatGolangMigrate:
+		return []Artifact{
+			{
+				Filename: fmt.Sprintf("%s_migration.up.sql", tsStr),
+				Content:  renderMigrateUp(p, version),
+			},
+			{
+				Filename: fmt.Sprintf("%s_migration.down.sql", tsStr),
+				Content:  renderMigrateDown(p, version),
+			},
+		}, nil
+
 	default:
-		return nil, fmt.Errorf("grizzle: unsupported export format %q (supported: sql, goose, atlas)", format)
+		return nil, fmt.Errorf("grizzle: unsupported export format %q (supported: sql, goose, atlas, migrate)", format)
 	}
 }
 
@@ -146,6 +162,46 @@ func renderGoose(p *plan.Plan, version string) string {
 	b.WriteString("\n")
 	if reversible {
 		b.WriteString("-- +goose Down\n")
+		revSteps := slices.Clone(p.Steps)
+		slices.Reverse(revSteps)
+		for _, s := range revSteps {
+			b.WriteString(reverseStepSQL(s))
+			b.WriteString("\n")
+		}
+	} else {
+		fmt.Fprintf(&b, "-- Down migration omitted: plan contains irreversible changes (%s on table %s)\n", failStep.Type, failStep.Table)
+	}
+
+	return b.String()
+}
+
+func renderMigrateUp(p *plan.Plan, version string) string {
+	var b strings.Builder
+	b.WriteString(renderHeader(p, version, "golang-migrate versioned migration artifact (up)"))
+
+	for _, step := range p.Steps {
+		b.WriteString(strings.TrimSpace(step.SQL))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func renderMigrateDown(p *plan.Plan, version string) string {
+	var b strings.Builder
+	b.WriteString(renderHeader(p, version, "golang-migrate versioned migration artifact (down)"))
+
+	// Check if all steps are reversible
+	var reversible = true
+	var failStep plan.Step
+	for _, s := range p.Steps {
+		if !isStepReversible(s) {
+			reversible = false
+			failStep = s
+			break
+		}
+	}
+
+	if reversible {
 		revSteps := slices.Clone(p.Steps)
 		slices.Reverse(revSteps)
 		for _, s := range revSteps {

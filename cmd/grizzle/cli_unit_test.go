@@ -72,8 +72,8 @@ func TestCLI_RunDirect(t *testing.T) {
 		t.Fatalf("expected exit 0 on check in sync, got %d", code)
 	}
 
-	// 9. Export sql, goose, and atlas
-	for _, format := range []string{"sql", "goose", "atlas"} {
+	// 9. Export sql, goose, atlas, migrate, and golang-migrate
+	for _, format := range []string{"sql", "goose", "atlas", "migrate", "golang-migrate"} {
 		exportDir := filepath.Join(tmpDir, "export_"+format)
 		if code := run([]string{"export", "--dsn", dsn, "--schema", schemaFile, "--format", format, "--out", exportDir}); code != 0 {
 			t.Fatalf("expected exit 0 on export %s, got %d", format, code)

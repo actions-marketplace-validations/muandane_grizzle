@@ -823,6 +823,10 @@ const (
 	ExportFormatGoose = export.FormatGoose
 	// ExportFormatAtlas targets Atlas-compatible migration files.
 	ExportFormatAtlas = export.FormatAtlas
+	// ExportFormatMigrate targets golang-migrate compatible (.up.sql / .down.sql) migration files.
+	ExportFormatMigrate = export.FormatMigrate
+	// ExportFormatGolangMigrate is an alias for ExportFormatMigrate.
+	ExportFormatGolangMigrate = export.FormatGolangMigrate
 )
 
 // ExportArtifact represents a generated migration file ready to be saved.

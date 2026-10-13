@@ -111,8 +111,9 @@ grizzle repair --dsn "$DATABASE_URL" --note "manually resolved"
 # Fail CI if live DB has drifted from schema.sql (exits with code 4)
 grizzle check --dsn "$DATABASE_URL" --schema schema.sql
 
-# Convert a plan to Goose migrations if you need an exit hatch
+# Convert a plan to Goose or golang-migrate migrations if you need an exit hatch
 grizzle export --plan plan.json --format goose --out ./migrations
+grizzle export --plan plan.json --format migrate --out ./migrations
 ```
 
 ### Exit Codes

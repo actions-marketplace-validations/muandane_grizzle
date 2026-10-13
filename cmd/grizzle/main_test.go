@@ -167,6 +167,35 @@ func TestCLI_Export(t *testing.T) {
 	if !strings.Contains(string(content), "-- +goose Up") {
 		t.Fatalf("expected goose Up header, got: %s", string(content))
 	}
+
+	// Export migrate format
+	migrateDir := filepath.Join(tmpDir, "exports_migrate")
+	cmdMigrate := exec.Command(binPath, "export", "--dsn", "sqlite::memory:", "--schema", schemaFile, "--format", "migrate", "--out", migrateDir) //nolint:gosec // G204: test executes CLI
+	out, err = cmdMigrate.CombinedOutput()
+	if err != nil {
+		t.Fatalf("export migrate failed: %v\nOutput: %s", err, string(out))
+	}
+
+	migrateFiles, err := os.ReadDir(migrateDir)
+	if err != nil {
+		t.Fatalf("reading migrate export dir: %v", err)
+	}
+	if len(migrateFiles) != 2 {
+		t.Fatalf("expected 2 exported files for migrate (up and down), got %d", len(migrateFiles))
+	}
+
+	var hasUp, hasDown bool
+	for _, f := range migrateFiles {
+		if strings.HasSuffix(f.Name(), ".up.sql") {
+			hasUp = true
+		}
+		if strings.HasSuffix(f.Name(), ".down.sql") {
+			hasDown = true
+		}
+	}
+	if !hasUp || !hasDown {
+		t.Fatalf("expected both .up.sql and .down.sql files, got: %+v", migrateFiles)
+	}
 }
 
 func TestCLI_RedactsDSNCredentials(t *testing.T) {
