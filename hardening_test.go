@@ -239,6 +239,13 @@ func TestHardening_PriorFailureBlocking(t *testing.T) {
 			if !errors.Is(err, grizzle.ErrPriorFailureBlocked) {
 				t.Fatalf("expected ErrPriorFailureBlocked, got: %v", err)
 			}
+			errMsg := err.Error()
+			if !strings.Contains(errMsg, "grizzle repair") {
+				t.Errorf("expected error message to mention 'grizzle repair', got: %s", errMsg)
+			}
+			if !strings.Contains(errMsg, "WithAllowResumePartial") {
+				t.Errorf("expected error message to mention 'WithAllowResumePartial', got: %s", errMsg)
+			}
 
 			// Verify live database state remained completely untouched
 			var exists bool
@@ -435,5 +442,77 @@ func TestHardening_ExpectedHashEnforcement(t *testing.T) {
 	err = grizzle.Sync(ctx, db, validOpts)
 	if !errors.Is(err, grizzle.ErrPlanDrift) {
 		t.Fatalf("expected ErrPlanDrift on re-run because live DB already updated (0 steps vs migration plan), got: %v", err)
+	}
+}
+
+func TestHardening_PriorFailureErrorGuidance_SQLite(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("opening sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+
+	// Initial sync
+	initialSchema := `CREATE TABLE accounts (id INTEGER PRIMARY KEY);`
+	if err := grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:   grizzle.DialectSQLite,
+		SchemaSQL: initialSchema,
+	}); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	// Insert failed history record
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO grizzle_history (plan_hash, status, failed_step, error, applied_at, duration_ms, applied_by, steps)
+		VALUES ('failed_hash_123', 'failed', 1, 'syntax error near foo', CURRENT_TIMESTAMP, 15, 'operator', '[]');
+	`); err != nil {
+		t.Fatalf("inserting failed record: %v", err)
+	}
+
+	// 1. Next Sync must fail closed with ErrPriorFailureBlocked and clear guidance
+	nextSchema := `CREATE TABLE accounts (id INTEGER PRIMARY KEY); CREATE TABLE notes (id INTEGER PRIMARY KEY);`
+	err = grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:   grizzle.DialectSQLite,
+		SchemaSQL: nextSchema,
+	})
+	if err == nil {
+		t.Fatal("expected Sync to fail closed on prior failure, got nil")
+	}
+	if !errors.Is(err, grizzle.ErrPriorFailureBlocked) {
+		t.Fatalf("expected ErrPriorFailureBlocked, got: %v", err)
+	}
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "grizzle repair") {
+		t.Errorf("expected error message to mention 'grizzle repair', got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "WithAllowResumePartial") {
+		t.Errorf("expected error message to mention 'WithAllowResumePartial', got: %s", errMsg)
+	}
+
+	// 2. Repair resolves the prior failure
+	repairEntry, err := grizzle.Repair(ctx, db, grizzle.RepairOptions{
+		Note: "resolved by operator test",
+	})
+	if err != nil {
+		t.Fatalf("Repair failed: %v", err)
+	}
+	if repairEntry.Status != "resolved" {
+		t.Fatalf("expected repaired status 'resolved', got: %s", repairEntry.Status)
+	}
+
+	// 3. Sync after repair succeeds without AllowResumePartial
+	err = grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:   grizzle.DialectSQLite,
+		SchemaSQL: nextSchema,
+	})
+	if err != nil {
+		t.Fatalf("expected Sync to succeed after Repair, got: %v", err)
+	}
+
+	var notesCount int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM notes;").Scan(&notesCount); err != nil {
+		t.Fatalf("querying notes: %v", err)
 	}
 }

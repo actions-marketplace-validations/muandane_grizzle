@@ -860,3 +860,75 @@ func TestSQLite_WithoutRowID_RebuildAboveThreshold(t *testing.T) {
 		t.Fatalf("row count after WITHOUT ROWID rebuild: got %d want %d", count, n)
 	}
 }
+
+func TestSQLite_RebuildStaleTempTableCleanup(t *testing.T) {
+	db := getSQLiteDB(t)
+	db.SetMaxOpenConns(1)
+	ctx := t.Context()
+
+	// 1. Initial schema with table users
+	initialSchema := `
+		CREATE TABLE users (
+			id INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			bio TEXT
+		);
+	`
+	if err := grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:   grizzle.DialectSQLite,
+		SchemaSQL: initialSchema,
+	}); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	// Insert data into users table
+	for i := 1; i <= 10; i++ {
+		if _, err := db.ExecContext(ctx, "INSERT INTO users (id, name, bio) VALUES (?, ?, ?);", i, fmt.Sprintf("user%d", i), "data"); err != nil {
+			t.Fatalf("insert user %d: %v", i, err)
+		}
+	}
+
+	// 2. Simulate an interrupted prior rebuild that left stale temp tables in sqlite
+	if _, err := db.ExecContext(ctx, "CREATE TABLE _grizzle_new_users (id INTEGER PRIMARY KEY, name TEXT);"); err != nil {
+		t.Fatalf("simulating leftover _grizzle_new_users: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CREATE TABLE _grizzle_tmp_users (id INTEGER PRIMARY KEY);"); err != nil {
+		t.Fatalf("simulating leftover _grizzle_tmp_users: %v", err)
+	}
+
+	// 3. Next boot triggers rebuild (dropping column bio)
+	alteredSchema := `
+		CREATE TABLE users (
+			id INTEGER PRIMARY KEY,
+			name TEXT NOT NULL
+		);
+	`
+	allowCol := true
+	err := grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:         grizzle.DialectSQLite,
+		SchemaSQL:       alteredSchema,
+		AllowDropColumn: &allowCol,
+		AcceptHazards:   []grizzle.HazardCode{grizzle.HazardDropColumn},
+	})
+	if err != nil {
+		t.Fatalf("expected next boot to clean up stale temp tables and succeed, but failed: %v", err)
+	}
+
+	// 4. Verify no data loss: all 10 users must be intact
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM users;").Scan(&count); err != nil {
+		t.Fatalf("querying user count: %v", err)
+	}
+	if count != 10 {
+		t.Fatalf("expected 10 users after rebuild, got %d", count)
+	}
+
+	// 5. Verify stale temp tables no longer exist
+	var tempCount int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('_grizzle_new_users', '_grizzle_tmp_users');").Scan(&tempCount); err != nil {
+		t.Fatalf("checking temp tables: %v", err)
+	}
+	if tempCount != 0 {
+		t.Fatalf("expected 0 leftover temp tables, found %d", tempCount)
+	}
+}

@@ -73,7 +73,7 @@ var (
 
 	// ErrPriorFailureBlocked is returned by Sync when the latest recorded migration
 	// in grizzle_history is in a 'partial' or 'failed' state and AllowResumePartial is false.
-	ErrPriorFailureBlocked = errors.New("grizzle: schema migration blocked by prior failed or partial migration; resolve previous failure before syncing or enable AllowResumePartial")
+	ErrPriorFailureBlocked = errors.New("grizzle: schema migration blocked by prior failed or partial migration; resolve previous failure with 'grizzle repair' or enable WithAllowResumePartial")
 
 	// ErrNoFailedMigration is returned when attempting to resolve or repair a failed migration,
 	// but no prior run is in a partial or failed state.
@@ -81,6 +81,11 @@ var (
 
 	// ErrBaselineDrift is returned when baseline is attempted on a database that has unapplied changes against schema.sql and Force is false.
 	ErrBaselineDrift = errors.New("grizzle: baseline refused: live database differs from schema.sql")
+
+	// ErrTransactionPooling is returned when a transaction-mode connection pooler
+	// (such as PgBouncer in transaction pooling mode) is detected during advisory lock
+	// acquisition. Grizzle requires a dedicated session to prevent lock leakage.
+	ErrTransactionPooling = errors.New("grizzle: transaction-mode connection pooler detected; session advisory locks require direct PostgreSQL connection or session pooling")
 )
 
 // HazardError reports all critical hazards that were not explicitly accepted.

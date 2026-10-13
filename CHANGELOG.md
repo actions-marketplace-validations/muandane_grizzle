@@ -5,6 +5,25 @@ All notable changes to Grizzle will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.1.0] - 2026-10-13
+
+### Added
+- **Migration Exporter for golang-migrate**:
+  - Export plan migrations to standard golang-migrate timestamped artifacts (`{timestamp}_migration.up.sql` and `{timestamp}_migration.down.sql`) via `--format migrate` (or `--format golang-migrate`).
+  - Full reverse-down migration synthesis for reversible DDL changes, with explicit omission comments for irreversible mutations.
+  - Public API support via `ExportFormatMigrate` and `ExportFormatGolangMigrate`.
+- **Operational Polish & GA Freeze**:
+  - Plan hash stability freeze: pinned golden hash test coverage across all plan step kinds.
+  - Fast transaction-pooling / PgBouncer detection on session advisory lock acquisition.
+  - SQLite rebuild crash recovery and actionable prior-failure error guidance.
+
+## [v0.1.0-rc5] - 2026-10-13
+
+### Fixed
+- **PostgreSQL Shadow Compilation Target Schema Qualifiers** (`ec87caf`):
+  - Fixed single-schema shadow compilation rewriting to rewrite target schema qualifiers (e.g. `public.foo`) to shadow-qualified references (e.g. `_grizzle_shadow.foo`) across functions, tables, views, triggers, and foreign keys.
+  - Avoids collision with live catalog objects in the target schema during shadow compilation.
+
 ## [v0.1.0-rc4] - 2026-10-13
 
 ### Added

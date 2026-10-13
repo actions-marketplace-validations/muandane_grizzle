@@ -715,13 +715,22 @@ func TestLocking_PgTerminateBackendRecovery(t *testing.T) {
 					LIMIT 1;
 				`
 				if err := db.QueryRow(query).Scan(&pid); err == nil && pid > 0 {
-					// Terminate immediately: sleeping here lets fast index
-					// builds finish first, which makes the sync succeed and
-					// flakes the test.
-					var success bool
-					_ = db.QueryRow("SELECT pg_terminate_backend($1);", pid).Scan(&success)
-					terminated <- true
-					return
+					// Wait until Phase 1 has committed the catalog entry before terminating
+					// so the invalid index (indisvalid=false) is guaranteed to persist in pg_index.
+					var idxOid int64
+					idxCheckQuery := fmt.Sprintf(`
+						SELECT i.indexrelid::bigint
+						FROM pg_index i
+						JOIN pg_class c ON c.oid = i.indexrelid
+						JOIN pg_namespace n ON n.oid = c.relnamespace
+						WHERE n.nspname = '%s' AND c.relname = 'idx_term_email';
+					`, schema)
+					if err := db.QueryRow(idxCheckQuery).Scan(&idxOid); err == nil && idxOid > 0 {
+						var success bool
+						_ = db.QueryRow("SELECT pg_terminate_backend($1);", pid).Scan(&success)
+						terminated <- true
+						return
+					}
 				}
 			}
 		}

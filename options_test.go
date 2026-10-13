@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -314,5 +316,61 @@ func TestOptions_Presets(t *testing.T) {
 	}
 	if prod.SchemaSQL != schemaSQL {
 		t.Errorf("expected prod.SchemaSQL matching")
+	}
+}
+
+func TestOptions_TargetSchema_DeprecatedAlias(t *testing.T) {
+	t.Parallel()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("opening sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	schemaSQL := `CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT);`
+
+	// 1. Sync using only TargetSchema deprecated alias
+	opts := grizzle.Options{
+		Dialect:      grizzle.DialectSQLite,
+		TargetSchema: "main",
+		SchemaSQL:    schemaSQL,
+	}
+	if err := grizzle.Sync(ctx, db, opts); err != nil {
+		t.Fatalf("Sync with TargetSchema failed: %v", err)
+	}
+
+	// 2. PlanDiff using only TargetSchema deprecated alias
+	planDiff, err := grizzle.PlanDiff(ctx, db, opts)
+	if err != nil {
+		t.Fatalf("PlanDiff with TargetSchema failed: %v", err)
+	}
+	if len(planDiff.Steps) != 0 {
+		t.Fatalf("expected 0 diff steps after Sync, got %d", len(planDiff.Steps))
+	}
+
+	// 3. Functional option WithTargetSchema
+	optsWithFunc := grizzle.Options{
+		Dialect:   grizzle.DialectSQLite,
+		SchemaSQL: schemaSQL,
+	}
+	grizzle.WithTargetSchema("main")(&optsWithFunc)
+	if optsWithFunc.TargetSchema != "main" {
+		t.Errorf("WithTargetSchema failed to set TargetSchema: got %q", optsWithFunc.TargetSchema)
+	}
+}
+
+func TestExportedAPI_NoInternalTypesLeaked(t *testing.T) {
+	t.Parallel()
+
+	cmd := exec.Command("go", "doc", "-all", ".")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go doc -all failed: %v\nOutput: %s", err, string(out))
+	}
+	docStr := string(out)
+	if strings.Contains(docStr, "/internal/") {
+		t.Fatalf("found unaliased internal package references in exported API doc:\n%s", docStr)
 	}
 }

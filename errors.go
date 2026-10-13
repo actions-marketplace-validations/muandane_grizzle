@@ -74,6 +74,10 @@ var (
 
 	// ErrBaselineDrift is returned by Baseline when the live database differs from desired schema and Force is false.
 	ErrBaselineDrift = plan.ErrBaselineDrift
+
+	// ErrTransactionPooling is returned when transaction-mode pooling (e.g., PgBouncer)
+	// prevents session-level advisory lock acquisition.
+	ErrTransactionPooling = plan.ErrTransactionPooling
 )
 
 // HazardError reports all critical hazards that were not explicitly accepted.

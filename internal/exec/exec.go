@@ -525,6 +525,9 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 		if logger != nil {
 			logger.ErrorContext(ctx, "grizzle: lock acquisition failed", "schemas", targetSchemas, "lock_id", cfg.LockID, "error", err)
 		}
+		if errors.Is(err, plan.ErrTransactionPooling) {
+			return 0, err
+		}
 		return 0, fmt.Errorf("%w: %w", plan.ErrLockAcquisition, err)
 	}
 	defer releasePostgresConn(ctx, conn, func(relCtx context.Context) error {
@@ -551,10 +554,10 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 	if latest != nil && (latest.Status == "partial" || latest.Status == "failed") {
 		if !cfg.AllowResumePartial {
 			if latest.Error != "" {
-				return 0, fmt.Errorf("%w: previous migration ended in %q status (plan %s, step %d): %s",
+				return 0, fmt.Errorf("%w: previous migration ended in %q status (plan %s, step %d): %s; resolve failure with 'grizzle repair' or resume with WithAllowResumePartial / Options.AllowResumePartial",
 					plan.ErrPriorFailureBlocked, latest.Status, latest.PlanHash, latest.FailedStep, latest.Error)
 			}
-			return 0, fmt.Errorf("%w: previous migration ended in %q status (plan %s, step %d)",
+			return 0, fmt.Errorf("%w: previous migration ended in %q status (plan %s, step %d); resolve failure with 'grizzle repair' or resume with WithAllowResumePartial / Options.AllowResumePartial",
 				plan.ErrPriorFailureBlocked, latest.Status, latest.PlanHash, latest.FailedStep)
 		}
 		if logger != nil {
@@ -1036,10 +1039,10 @@ func SyncSQLite(ctx context.Context, db *sql.DB, cfg SQLiteExecConfig) error {
 		if latest != nil && (latest.Status == "partial" || latest.Status == "failed") {
 			if !cfg.AllowResumePartial {
 				if latest.Error != "" {
-					return fmt.Errorf("%w: previous migration ended in %q status (plan %s, step %d): %s",
+					return fmt.Errorf("%w: previous migration ended in %q status (plan %s, step %d): %s; resolve failure with 'grizzle repair' or resume with WithAllowResumePartial / Options.AllowResumePartial",
 						plan.ErrPriorFailureBlocked, latest.Status, latest.PlanHash, latest.FailedStep, latest.Error)
 				}
-				return fmt.Errorf("%w: previous migration ended in %q status (plan %s, step %d)",
+				return fmt.Errorf("%w: previous migration ended in %q status (plan %s, step %d); resolve failure with 'grizzle repair' or resume with WithAllowResumePartial / Options.AllowResumePartial",
 					plan.ErrPriorFailureBlocked, latest.Status, latest.PlanHash, latest.FailedStep)
 			}
 			if logger != nil {
@@ -1371,6 +1374,9 @@ func applyPostgresOnce(ctx context.Context, db *sql.DB, p *plan.Plan, cfg Postgr
 	if err != nil {
 		if logger != nil {
 			logger.ErrorContext(ctx, "grizzle: lock acquisition failed", "schemas", targetSchemas, "lock_id", cfg.LockID, "error", err)
+		}
+		if errors.Is(err, plan.ErrTransactionPooling) {
+			return 0, err
 		}
 		return 0, fmt.Errorf("%w: %w", plan.ErrLockAcquisition, err)
 	}
@@ -1775,6 +1781,18 @@ func executeSQLiteStepInner(ctx context.Context, tx *sql.Tx, s plan.Step, cfg SQ
 	// Table rebuild step: wrap in SAVEPOINT grizzle_rebuild
 	if _, err := tx.ExecContext(ctx, "SAVEPOINT grizzle_rebuild;"); err != nil {
 		return fmt.Errorf("creating savepoint: %w", err)
+	}
+
+	// Clean up any stale temporary tables leftover from an interrupted prior rebuild attempt.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s;", quoteSQLiteTable(s.Schema, "_grizzle_new_"+s.Table))); err != nil {
+		_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT grizzle_rebuild;")
+		_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT grizzle_rebuild;")
+		return fmt.Errorf("cleaning stale temp table _grizzle_new_%s: %w", s.Table, err)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s;", quoteSQLiteTable(s.Schema, "_grizzle_tmp_"+s.Table))); err != nil {
+		_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT grizzle_rebuild;")
+		_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT grizzle_rebuild;")
+		return fmt.Errorf("cleaning stale temp table _grizzle_tmp_%s: %w", s.Table, err)
 	}
 
 	threshold := cfg.RebuildThreshold

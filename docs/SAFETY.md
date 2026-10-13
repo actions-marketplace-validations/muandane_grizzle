@@ -62,7 +62,7 @@ Ent is an entity framework for Go providing declarative schema migration. As doc
 
 1. **Safe default drop policies:** Ent defaults to non-destructive behavior: destructive column drops are disabled by default (`schema.WithDropColumn(false)`), and migrations can be restricted to specific tables using `schema.WithTables(...)`.
 2. **Coupling to code generation:** Schemas must be defined in Go code using Ent's DSL (`ent/schema`). Teams cannot use standard `schema.sql` files directly, preventing direct interoperability with SQL-centric tooling such as `sqlc` or raw DDL scripts without secondary synchronization.
-3. **Operational ergonomics:** While Ent supports custom migration hooks and advisory locks via custom driver configuration, it does not provide built-in hazard code gating (`CRITICAL` vs `WARNING`), deterministic plan hashing (`Plan.Hash()`), CLI migration export (to Goose or Atlas), or staged expand-and-contract column renames from SQL DDL.
+3. **Operational ergonomics:** While Ent supports custom migration hooks and advisory locks via custom driver configuration, it does not provide built-in hazard code gating (`CRITICAL` vs `WARNING`), deterministic plan hashing (`Plan.Hash()`), CLI migration export (to Goose, Atlas, or golang-migrate), or staged expand-and-contract column renames from SQL DDL.
 
 ## Grizzle safety invariants
 

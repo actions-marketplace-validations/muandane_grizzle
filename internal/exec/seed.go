@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -91,6 +92,9 @@ func SeedPostgres(ctx context.Context, db *sql.DB, cfg SeedExecConfig, seedSQL s
 	}
 	cancelLock()
 	if err != nil {
+		if errors.Is(err, plan.ErrTransactionPooling) {
+			return err
+		}
 		return fmt.Errorf("%w: %w", plan.ErrLockTimeout, err)
 	}
 	defer func() {

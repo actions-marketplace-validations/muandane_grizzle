@@ -115,7 +115,7 @@ func setupLogger(jsonLog bool) {
 }
 
 var (
-	version = "v0.1.0-rc4"
+	version = "v0.1.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -139,7 +139,7 @@ func run(args []string) int {
 		schemaFile     = fs.String("schema", "schema.sql", "Path to schema SQL file")
 		planFile       = fs.String("plan", "", "Path to plan JSON file")
 		outFile        = fs.String("out", "", "Destination file or directory")
-		formatFlag     = fs.String("format", "sql", "Output/export format: sql, goose, atlas, or github")
+		formatFlag     = fs.String("format", "sql", "Output/export format: sql, goose, atlas, migrate, or github")
 		allowDrop      = fs.Bool("allow-drop", false, "Permit destructive operations")
 		jsonOutput     = fs.Bool("json", false, "Output in JSON format")
 		githubOutput   = fs.Bool("github", false, "Emit GitHub Actions workflow annotations")

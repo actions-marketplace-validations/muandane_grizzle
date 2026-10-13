@@ -105,8 +105,8 @@ func parseYAML(content string, cfg *Config) error {
 		}
 
 		// Check for list item "- value"
-		if strings.HasPrefix(trimmed, "-") {
-			val := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+		if after, ok := strings.CutPrefix(trimmed, "-"); ok {
+			val := strings.TrimSpace(after)
 			val = strings.Trim(val, `"'`)
 			switch currentListKey {
 			case "accept_hazards":
