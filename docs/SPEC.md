@@ -69,6 +69,13 @@ type Options struct {
     // and must not name a target or included schema; violations fail with ErrInvalidOptions.
     ShadowSchema string
 
+    // DevDatabaseURL optionally specifies an external PostgreSQL database connection string
+    // used to compile and introspect shadow schemas instead of compiling them against the target database.
+    // When unset, shadow schemas compile against the target database connection.
+    // If the target database user lacks CREATE SCHEMA privileges and no DevDatabaseURL is set,
+    // Grizzle returns a clear error naming the fix without silent fallbacks.
+    DevDatabaseURL string
+
     // AllowDrop permits all destructive operations when set to true.
     // Defaults to false for zero data loss.
     AllowDrop bool

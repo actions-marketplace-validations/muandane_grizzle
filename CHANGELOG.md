@@ -5,6 +5,14 @@ All notable changes to Grizzle will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.0] - Unreleased
+
+### Added
+- **External Dev Database URL for Shadow Compilation** (`--dev-url` / `Options.DevDatabaseURL`):
+  - Support compiling shadow schemas against an external development database instead of the live target database.
+  - Actionable error guidance: when the target database user lacks `CREATE SCHEMA` privileges and no dev URL is provided, returns an explicit error naming `--dev-url` / `Options.DevDatabaseURL` and `GRANT CREATE ON DATABASE` with zero silent fallback.
+  - CLI integration across `plan`, `apply`, `check`, `lint`, `export`, `status`, and `baseline` via `--dev-url` flag, `GRIZZLE_DEV_URL` / `DEV_DATABASE_URL` environment variables, and `dev_url` config property in `grizzle.yaml`.
+
 ## [v0.1.0] - 2026-10-13
 
 ### Added

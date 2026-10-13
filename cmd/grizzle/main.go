@@ -78,6 +78,16 @@ func getDSN(explicit string) string {
 	return os.Getenv("DATABASE_URL")
 }
 
+func getDevURL(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if env := os.Getenv("GRIZZLE_DEV_URL"); env != "" {
+		return env
+	}
+	return os.Getenv("DEV_DATABASE_URL")
+}
+
 func redactDSN(dsn string) string {
 	if dsn == "" {
 		return ""
@@ -136,6 +146,7 @@ func run(args []string) int {
 
 	var (
 		dsnFlag        = fs.String("dsn", "", "Database DSN connection string")
+		devURLFlag     = fs.String("dev-url", "", "Dev database connection string used for shadow-schema compilation (overrides target DB)")
 		schemaFile     = fs.String("schema", "schema.sql", "Path to schema SQL file")
 		planFile       = fs.String("plan", "", "Path to plan JSON file")
 		outFile        = fs.String("out", "", "Destination file or directory")
@@ -189,6 +200,9 @@ func run(args []string) int {
 		if *dsnFlag == "" && cfg.DSN != "" {
 			*dsnFlag = cfg.DSN
 		}
+		if *devURLFlag == "" && cfg.DevURL != "" {
+			*devURLFlag = cfg.DevURL
+		}
 		if *schemaFile == "schema.sql" && cfg.Schema != "" {
 			*schemaFile = cfg.Schema
 		}
@@ -227,6 +241,7 @@ func run(args []string) int {
 
 	ctx := context.Background()
 	dsn := getDSN(*dsnFlag)
+	devURL := getDevURL(*devURLFlag)
 
 	backfillHook, err := resolveBackfillHook(*expandContract, backfill, *backfillFile, *backfillBatch, dsn)
 	if err != nil {
@@ -263,7 +278,7 @@ func run(args []string) int {
 		if !ok {
 			return 1
 		}
-		return runPlan(ctx, dsn, *schemaFile, rolesSQL, catalogSQL, *outFile, *allowDrop, isJSON, isGitHub, renames, *expandContract, backfillHook)
+		return runPlan(ctx, dsn, devURL, *schemaFile, rolesSQL, catalogSQL, *outFile, *allowDrop, isJSON, isGitHub, renames, *expandContract, backfillHook)
 	case "apply":
 		rolesSQL, ok := readRolesFile(*rolesFile)
 		if !ok {
@@ -273,7 +288,7 @@ func run(args []string) int {
 		if !ok {
 			return 1
 		}
-		return runApply(ctx, dsn, *planFile, *schemaFile, rolesSQL, catalogSQL, *expectedHash, *allowDrop, hazards, *dryRunFlag, renames, *expandContract, backfillHook, beforeHook, afterHook)
+		return runApply(ctx, dsn, devURL, *planFile, *schemaFile, rolesSQL, catalogSQL, *expectedHash, *allowDrop, hazards, *dryRunFlag, renames, *expandContract, backfillHook, beforeHook, afterHook)
 	case "check":
 		rolesSQL, ok := readRolesFile(*rolesFile)
 		if !ok {
@@ -283,23 +298,23 @@ func run(args []string) int {
 		if !ok {
 			return 1
 		}
-		return runCheck(ctx, dsn, *schemaFile, rolesSQL, catalogSQL, *allowDrop, renames, *expandContract, backfillHook)
+		return runCheck(ctx, dsn, devURL, *schemaFile, rolesSQL, catalogSQL, *allowDrop, renames, *expandContract, backfillHook)
 	case "lint":
 		lintFormat := *formatFlag
 		if lintFormat == "sql" {
 			lintFormat = "text"
 		}
-		return runLint(ctx, dsn, *schemaFile, lintFormat, *failOnWarn)
+		return runLint(ctx, dsn, devURL, *schemaFile, lintFormat, *failOnWarn)
 	case "export":
-		return runExport(ctx, dsn, *planFile, *schemaFile, *formatFlag, *versionFlag, *outFile, *allowDrop)
+		return runExport(ctx, dsn, devURL, *planFile, *schemaFile, *formatFlag, *versionFlag, *outFile, *allowDrop)
 	case "seed":
 		return runSeed(ctx, dsn, *seedFile, *forceFlag)
 	case "history":
 		return runHistory(ctx, dsn, *targetSchema, *limitFlag, *jsonOutput)
 	case "status":
-		return runStatus(ctx, dsn, *schemaFile, *targetSchema, *jsonOutput)
+		return runStatus(ctx, dsn, devURL, *schemaFile, *targetSchema, *jsonOutput)
 	case "baseline":
-		return runBaseline(ctx, dsn, *schemaFile, *targetSchema, *noteFlag, *forceFlag)
+		return runBaseline(ctx, dsn, devURL, *schemaFile, *targetSchema, *noteFlag, *forceFlag)
 	case "repair":
 		return runRepair(ctx, dsn, *targetSchema, *noteFlag)
 	case "dump":
@@ -352,7 +367,7 @@ func readOptionalSQLFile(path, label string) (string, bool) {
 	return string(content), true
 }
 
-func loadOrComputePlan(ctx context.Context, db *sql.DB, planFile, schemaFile, rolesSQL, catalogSQL string, allowDrop bool, acceptedCodes []grizzle.HazardCode, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc) (*grizzle.Plan, string, error) {
+func loadOrComputePlan(ctx context.Context, db *sql.DB, planFile, schemaFile, devURL, rolesSQL, catalogSQL string, allowDrop bool, acceptedCodes []grizzle.HazardCode, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc) (*grizzle.Plan, string, error) {
 	if planFile != "" {
 		planData, err := os.ReadFile(filepath.Clean(planFile)) //nolint:gosec // G304: CLI accepts user-provided plan file path
 		if err != nil {
@@ -374,6 +389,7 @@ func loadOrComputePlan(ctx context.Context, db *sql.DB, planFile, schemaFile, ro
 	}
 	opts := grizzle.Options{
 		SchemaSQL:      string(content),
+		DevDatabaseURL: devURL,
 		RolesSQL:       rolesSQL,
 		CatalogSQL:     catalogSQL,
 		AllowDrop:      allowDrop,
@@ -390,7 +406,7 @@ func loadOrComputePlan(ctx context.Context, db *sql.DB, planFile, schemaFile, ro
 	return computedPlan, computedPlan.Hash(), nil
 }
 
-func runPlan(ctx context.Context, dsn, schemaFile, rolesSQL, catalogSQL, outFile string, allowDrop, jsonOutput, githubOutput bool, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc) int {
+func runPlan(ctx context.Context, dsn, devURL, schemaFile, rolesSQL, catalogSQL, outFile string, allowDrop, jsonOutput, githubOutput bool, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc) int {
 	db, err := initDB(dsn)
 	if err != nil {
 		return 1
@@ -405,6 +421,7 @@ func runPlan(ctx context.Context, dsn, schemaFile, rolesSQL, catalogSQL, outFile
 
 	opts := grizzle.Options{
 		SchemaSQL:      string(content),
+		DevDatabaseURL: devURL,
 		RolesSQL:       rolesSQL,
 		CatalogSQL:     catalogSQL,
 		AllowDrop:      allowDrop,
@@ -459,7 +476,7 @@ func resolveSyncHook(scriptOrPath string) (grizzle.SyncHook, error) {
 	}, nil
 }
 
-func runApply(ctx context.Context, dsn, planFile, schemaFile, rolesSQL, catalogSQL, expectedHash string, allowDrop bool, hazards []string, dryRun bool, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc, hooks ...grizzle.SyncHook) int {
+func runApply(ctx context.Context, dsn, devURL, planFile, schemaFile, rolesSQL, catalogSQL, expectedHash string, allowDrop bool, hazards []string, dryRun bool, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc, hooks ...grizzle.SyncHook) int {
 	var beforeSync, afterSync grizzle.SyncHook
 	if len(hooks) > 0 {
 		beforeSync = hooks[0]
@@ -479,10 +496,10 @@ func runApply(ctx context.Context, dsn, planFile, schemaFile, rolesSQL, catalogS
 	}
 
 	if dryRun {
-		return runDryRunApply(ctx, db, planFile, schemaFile, rolesSQL, catalogSQL, allowDrop, acceptedCodes, renames, expandContract, backfill)
+		return runDryRunApply(ctx, db, planFile, schemaFile, devURL, rolesSQL, catalogSQL, allowDrop, acceptedCodes, renames, expandContract, backfill)
 	}
 
-	p, planHash, err := loadOrComputePlan(ctx, db, planFile, schemaFile, rolesSQL, catalogSQL, allowDrop, acceptedCodes, renames, expandContract, backfill)
+	p, planHash, err := loadOrComputePlan(ctx, db, planFile, schemaFile, devURL, rolesSQL, catalogSQL, allowDrop, acceptedCodes, renames, expandContract, backfill)
 	if err != nil {
 		return 1
 	}
@@ -508,11 +525,12 @@ func runApply(ctx context.Context, dsn, planFile, schemaFile, rolesSQL, catalogS
 	}
 
 	applyOpts := grizzle.ApplyOpts{
-		ExpectedHash:  expHash,
-		AcceptHazards: acceptedCodes,
-		Backfill:      backfill,
-		BeforeSync:    beforeSync,
-		AfterSync:     afterSync,
+		ExpectedHash:   expHash,
+		AcceptHazards:  acceptedCodes,
+		Backfill:       backfill,
+		BeforeSync:     beforeSync,
+		AfterSync:      afterSync,
+		DevDatabaseURL: devURL,
 	}
 
 	if err := grizzle.Apply(ctx, db, p, applyOpts); err != nil {
@@ -533,7 +551,7 @@ func runApply(ctx context.Context, dsn, planFile, schemaFile, rolesSQL, catalogS
 	return 0
 }
 
-func runCheck(ctx context.Context, dsn, schemaFile, rolesSQL, catalogSQL string, allowDrop bool, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc) int {
+func runCheck(ctx context.Context, dsn, devURL, schemaFile, rolesSQL, catalogSQL string, allowDrop bool, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc) int {
 	db, err := initDB(dsn)
 	if err != nil {
 		return 1
@@ -548,6 +566,7 @@ func runCheck(ctx context.Context, dsn, schemaFile, rolesSQL, catalogSQL string,
 
 	opts := grizzle.Options{
 		SchemaSQL:      string(content),
+		DevDatabaseURL: devURL,
 		RolesSQL:       rolesSQL,
 		CatalogSQL:     catalogSQL,
 		AllowDrop:      allowDrop,
@@ -572,7 +591,7 @@ func runCheck(ctx context.Context, dsn, schemaFile, rolesSQL, catalogSQL string,
 	return 0
 }
 
-func runExport(ctx context.Context, dsn, planFile, schemaFile, format, versionFlag, outFile string, allowDrop bool) int {
+func runExport(ctx context.Context, dsn, devURL, planFile, schemaFile, format, versionFlag, outFile string, allowDrop bool) int {
 	var p *grizzle.Plan
 	if planFile != "" {
 		planData, err := os.ReadFile(filepath.Clean(planFile)) //nolint:gosec // G304: CLI accepts user-provided plan file path
@@ -603,8 +622,9 @@ func runExport(ctx context.Context, dsn, planFile, schemaFile, format, versionFl
 			return 1
 		}
 		opts := grizzle.Options{
-			SchemaSQL: string(content),
-			AllowDrop: allowDrop,
+			SchemaSQL:      string(content),
+			AllowDrop:      allowDrop,
+			DevDatabaseURL: devURL,
 		}
 		computedPlan, err := grizzle.PlanDiff(ctx, db, opts)
 		if err != nil {
@@ -691,7 +711,7 @@ func runHistory(ctx context.Context, dsn, targetSchema string, limit int, jsonOu
 	return 0
 }
 
-func runStatus(ctx context.Context, dsn, schemaFile, targetSchema string, jsonOutput bool) int {
+func runStatus(ctx context.Context, dsn, devURL, schemaFile, targetSchema string, jsonOutput bool) int {
 	db, err := initDB(dsn)
 	if err != nil {
 		return 1
@@ -709,8 +729,9 @@ func runStatus(ctx context.Context, dsn, schemaFile, targetSchema string, jsonOu
 	}
 
 	stat, err := grizzle.Status(ctx, db, grizzle.Options{
-		TargetSchema: targetSchema,
-		SchemaSQL:    schemaSQL,
+		TargetSchema:   targetSchema,
+		SchemaSQL:      schemaSQL,
+		DevDatabaseURL: devURL,
 	})
 	if err != nil {
 		slog.Error("getting database migration status", "err", err)
@@ -757,7 +778,7 @@ func runStatus(ctx context.Context, dsn, schemaFile, targetSchema string, jsonOu
 	return 0
 }
 
-func runBaseline(ctx context.Context, dsn, schemaFile, targetSchema, note string, force bool) int {
+func runBaseline(ctx context.Context, dsn, devURL, schemaFile, targetSchema, note string, force bool) int {
 	db, err := initDB(dsn)
 	if err != nil {
 		return 1
@@ -771,9 +792,10 @@ func runBaseline(ctx context.Context, dsn, schemaFile, targetSchema, note string
 	}
 
 	entry, err := grizzle.Baseline(ctx, db, string(content), grizzle.BaselineOptions{
-		TargetSchema: targetSchema,
-		Note:         note,
-		Force:        force,
+		TargetSchema:   targetSchema,
+		Note:           note,
+		Force:          force,
+		DevDatabaseURL: devURL,
 	})
 	if err != nil {
 		if errors.Is(err, grizzle.ErrBaselineDrift) {

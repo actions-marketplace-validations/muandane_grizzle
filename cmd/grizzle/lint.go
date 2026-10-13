@@ -13,7 +13,7 @@ import (
 
 // runLint statically lints a schema.sql file. SQLite compilation is fully
 // offline (in-memory shadow); PostgreSQL compilation uses the DSN shadow path.
-func runLint(ctx context.Context, dsn, schemaFile, format string, failOnWarning bool) int {
+func runLint(ctx context.Context, dsn, devURL, schemaFile, format string, failOnWarning bool) int {
 	content, err := os.ReadFile(filepath.Clean(schemaFile)) //nolint:gosec // G304: CLI accepts user-provided schema file path
 	if err != nil {
 		slog.Error("reading schema file", "path", schemaFile, "err", err)
@@ -37,8 +37,9 @@ func runLint(ctx context.Context, dsn, schemaFile, format string, failOnWarning 
 	defer func() { _ = db.Close() }()
 
 	opts := grizzle.Options{
-		SchemaSQL: string(content),
-		Dialect:   grizzle.DialectAuto,
+		SchemaSQL:      string(content),
+		Dialect:        grizzle.DialectAuto,
+		DevDatabaseURL: devURL,
 	}
 	ir, err := grizzle.CompileSchema(ctx, db, opts)
 	if err != nil {

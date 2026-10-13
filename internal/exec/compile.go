@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/muandane/grizzle/internal/dialect/postgres"
 	"github.com/muandane/grizzle/internal/dialect/sqlite"
+	"github.com/muandane/grizzle/internal/plan"
 	"github.com/muandane/grizzle/internal/schema"
 )
 
@@ -67,6 +69,10 @@ func CompileSchemaSQLite(ctx context.Context, schemaSQL string, schemas ...strin
 // single always-rolled-back transaction and returns the desired schema IR.
 // The shadow schema is created and dropped as part of the transaction, so no
 // durable state is modified.
+//
+// When cfg.DevDB is non-nil, the shadow compilation transaction runs against
+// cfg.DevDB instead of db. This lets callers compile against an external
+// database when the target database user lacks CREATE SCHEMA privilege.
 func CompileSchemaPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) (*schema.Schema, error) {
 	groups, err := splitSchemaSQL(cfg.SchemaSQL)
 	if err != nil {
@@ -76,17 +82,23 @@ func CompileSchemaPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConf
 	primarySchema := cfg.primarySchema()
 	shadowSchema := cfg.ShadowSchema
 	if shadowSchema == "" {
-		shadowSchema = "_grizzle_shadow"
+		shadowSchema = uniqueShadowName("_grizzle_shadow")
 	}
 
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	// Route the shadow transaction to DevDB when configured.
+	shadowDB := db
+	if cfg.DevDB != nil {
+		shadowDB = cfg.DevDB
+	}
+
+	tx, err := shadowDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
-		return nil, fmt.Errorf("grizzle: failed to begin transaction: %w", err)
+		return nil, fmt.Errorf("grizzle: failed to begin shadow transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	if err := postgres.SetupShadowSchema(ctx, tx, shadowSchema); err != nil {
-		return nil, err
+		return nil, wrapShadowSetupError(err, cfg.DevDB != nil)
 	}
 	if err := postgres.RunShadowDDL(ctx, tx, shadowSchema, primarySchema, groups.ShadowSQL); err != nil {
 		return nil, err
@@ -124,4 +136,38 @@ func CompileSchemaPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConf
 	s.SourceSQL = cfg.SchemaSQL
 	s.Dialect = "postgres"
 	return s, nil
+}
+
+// wrapShadowSetupError wraps a shadow schema setup error with an actionable
+// message. When hasDevDB is false and the error looks like a privilege failure
+// (PostgreSQL SQLSTATE 42501: insufficient_privilege), the message explicitly
+// names --dev-url / Options.DevDatabaseURL as the fix.
+func wrapShadowSetupError(err error, hasDevDB bool) error {
+	if err == nil {
+		return nil
+	}
+	if !hasDevDB && isPrivilegeError(err) {
+		return fmt.Errorf("%w: target database user lacks CREATE SCHEMA privilege required for shadow compilation; "+
+			"supply an external database via --dev-url / Options.DevDatabaseURL, "+
+			"or GRANT CREATE ON DATABASE to the migration user: %w",
+			plan.ErrCompilationFailed, err)
+	}
+	return err
+}
+
+// isPrivilegeError reports whether err is a PostgreSQL insufficient_privilege
+// (SQLSTATE 42501) or contains equivalent text.
+func isPrivilegeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type sqlStater interface{ SQLState() string }
+	if s, ok := err.(sqlStater); ok && s.SQLState() == "42501" { //nolint:errorlint // intentional interface check on concrete err
+		return true
+	}
+	// Fallback: match pgx PgError via error unwrapping.
+	errStr := err.Error()
+	return strings.Contains(errStr, "42501") ||
+		strings.Contains(errStr, "insufficient_privilege") ||
+		strings.Contains(errStr, "permission denied to create schema")
 }

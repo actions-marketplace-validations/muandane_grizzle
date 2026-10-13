@@ -20,6 +20,7 @@ type LintConfig struct {
 // Config represents project-level configuration for Grizzle.
 type Config struct {
 	DSN           string     `json:"dsn"`
+	DevURL        string     `json:"dev_url"`
 	Schema        string     `json:"schema"`
 	Dialect       string     `json:"dialect"`
 	TargetSchema  string     `json:"target_schema"`
@@ -156,6 +157,8 @@ func parseYAML(content string, cfg *Config) error {
 		switch k {
 		case "dsn":
 			cfg.DSN = v
+		case "dev_url":
+			cfg.DevURL = v
 		case "schema":
 			cfg.Schema = v
 		case "dialect":

@@ -246,6 +246,19 @@ type Options struct {
 	// with ErrPlanDrift if they differ.
 	ExpectedHash string
 
+	// DevDatabaseURL is an optional PostgreSQL connection string used
+	// exclusively for shadow-schema compilation (the always-rolled-back
+	// transaction that validates SchemaSQL). When non-empty the shadow
+	// transaction runs against this external database and never touches the
+	// target database. Live catalog introspection always uses the target DB.
+	//
+	// Use DevDatabaseURL when the target database user lacks CREATE SCHEMA
+	// privilege. Without it, a privilege failure during shadow setup is
+	// returned as an error that names this field and --dev-url as the fix.
+	//
+	// PostgreSQL only; ignored on SQLite.
+	DevDatabaseURL string
+
 	// Logger accepts a structured logger (*slog.Logger) for migration events.
 	Logger *slog.Logger
 
@@ -423,6 +436,21 @@ func WithAllowResumePartial(allow bool) Option {
 func WithExpectedHash(hash string) Option {
 	return func(o *Options) {
 		o.ExpectedHash = hash
+	}
+}
+
+// WithDevDatabaseURL sets the external database URL used for shadow-schema
+// compilation. When non-empty, the always-rolled-back shadow transaction runs
+// against this database instead of the target database.
+//
+// Use when the target database user lacks CREATE SCHEMA privilege. Without
+// this option a privilege failure during shadow setup returns a clear error
+// naming --dev-url / Options.DevDatabaseURL as the fix.
+//
+// PostgreSQL only; ignored on SQLite.
+func WithDevDatabaseURL(url string) Option {
+	return func(o *Options) {
+		o.DevDatabaseURL = url
 	}
 }
 

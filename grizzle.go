@@ -363,6 +363,20 @@ func prepareOptions(ctx context.Context, db *sql.DB, opts *Options) error {
 	return nil
 }
 
+func openDevDB(opts Options) (*sql.DB, func(), error) {
+	if opts.DevDatabaseURL == "" || opts.Dialect != DialectPostgres {
+		return nil, func() {}, nil
+	}
+	devDB, err := sql.Open("pgx", opts.DevDatabaseURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("grizzle: failed to open dev database: %w", err)
+	}
+	cleanup := func() {
+		_ = devDB.Close()
+	}
+	return devDB, cleanup, nil
+}
+
 // Sync synchronizes the target database schema to match the desired state in opts.SchemaSQL.
 func Sync(ctx context.Context, db *sql.DB, opts Options) error {
 	if err := prepareOptions(ctx, db, &opts); err != nil {
@@ -371,6 +385,12 @@ func Sync(ctx context.Context, db *sql.DB, opts Options) error {
 
 	policy := resolveDropPolicy(opts)
 	filters := toScopeFilters(opts)
+
+	devDB, cleanupDevDB, err := openDevDB(opts)
+	if err != nil {
+		return err
+	}
+	defer cleanupDevDB()
 
 	var syncErr error
 	if opts.Dialect == DialectSQLite {
@@ -423,6 +443,7 @@ func Sync(ctx context.Context, db *sql.DB, opts Options) error {
 			AfterSync:            opts.AfterSync,
 			BeforeStep:           opts.BeforeStep,
 			AfterStep:            opts.AfterStep,
+			DevDB:                devDB,
 		})
 	}
 	if syncErr != nil {
@@ -511,6 +532,12 @@ func PlanDiff(ctx context.Context, db *sql.DB, opts Options) (*Plan, error) {
 		})
 	}
 
+	devDB, cleanupDevDB, err := openDevDB(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanupDevDB()
+
 	return exec.PlanDiffPostgres(ctx, db, exec.PostgresExecConfig{
 		TargetSchema:         opts.TargetSchema,
 		TargetSchemas:        opts.TargetSchemas,
@@ -530,6 +557,7 @@ func PlanDiff(ctx context.Context, db *sql.DB, opts Options) (*Plan, error) {
 		Logger:               opts.Logger,
 		Tracer:               opts.Tracer,
 		DryRun:               opts.DryRun,
+		DevDB:                devDB,
 	})
 }
 
@@ -572,6 +600,10 @@ type ApplyOpts struct {
 
 	// LockNamespace specifies the application namespace string used for PostgreSQL advisory locking (defaults to "grizzle").
 	LockNamespace string
+
+	// DevDatabaseURL optionally specifies an external database connection URL
+	// used for shadow schema compilation during plan verification.
+	DevDatabaseURL string
 
 	// Logger receives structured migration logs during Apply (defaults to no logging).
 	// The plan artifact cannot carry a logger, so it is supplied here.
@@ -632,6 +664,7 @@ func optionsFromPlan(p *Plan, opts ApplyOpts) Options {
 		StatementTimeout:         p.StatementTimeout,
 		NonConcurrentIndexes:     p.NonConcurrentIndexes,
 		ExpectedHash:             opts.ExpectedHash,
+		DevDatabaseURL:           opts.DevDatabaseURL,
 		Logger:                   opts.Logger,
 		Tracer:                   opts.Tracer,
 	}
@@ -901,11 +934,16 @@ func CompileSchema(ctx context.Context, db *sql.DB, opts Options) (*SchemaIR, er
 		}
 		targetSchema := cmp.Or(opts.TargetSchema, "public")
 		shadowSchema := cmp.Or(opts.ShadowSchema, "_grizzle_shadow")
-		var err error
+		devDB, cleanupDevDB, err := openDevDB(opts)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanupDevDB()
 		s, err = exec.CompileSchemaPostgres(ctx, db, exec.PostgresExecConfig{
 			TargetSchema: targetSchema,
 			ShadowSchema: shadowSchema,
 			SchemaSQL:    opts.SchemaSQL,
+			DevDB:        devDB,
 		})
 		if err != nil {
 			return nil, err
@@ -1099,6 +1137,12 @@ func DryRunVerify(ctx context.Context, db *sql.DB, opts Options) (*DryRunResult,
 		})
 	}
 
+	devDB, cleanupDevDB, err := openDevDB(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanupDevDB()
+
 	return exec.DryRunVerifyPostgres(ctx, db, exec.PostgresExecConfig{
 		TargetSchema:         opts.TargetSchema,
 		TargetSchemas:        opts.TargetSchemas,
@@ -1122,6 +1166,7 @@ func DryRunVerify(ctx context.Context, db *sql.DB, opts Options) (*DryRunResult,
 		AfterStep:            opts.AfterStep,
 		DryRunLockTimeout:    opts.DryRunLockTimeout,
 		ExecuteHooksInDryRun: opts.ExecuteHooksInDryRun,
+		DevDB:                devDB,
 	})
 }
 
@@ -1175,9 +1220,10 @@ type StatusReport struct {
 
 // BaselineOptions configures baselining an existing database.
 type BaselineOptions struct {
-	TargetSchema string
-	Note         string
-	Force        bool // If true, record baseline even if unapplied changes exist
+	TargetSchema   string
+	Note           string
+	Force          bool // If true, record baseline even if unapplied changes exist
+	DevDatabaseURL string
 }
 
 // RepairOptions configures repairing failed/partial migration history.
@@ -1316,9 +1362,10 @@ func Baseline(ctx context.Context, db *sql.DB, schemaSQL string, opts BaselineOp
 	}
 
 	planOpts := Options{
-		Dialect:      d,
-		SchemaSQL:    schemaSQL,
-		TargetSchema: targetSchema,
+		Dialect:        d,
+		SchemaSQL:      schemaSQL,
+		TargetSchema:   targetSchema,
+		DevDatabaseURL: opts.DevDatabaseURL,
 	}
 	diffPlan, err := PlanDiff(ctx, db, planOpts)
 	if err != nil {

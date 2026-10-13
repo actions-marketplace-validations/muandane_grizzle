@@ -34,8 +34,8 @@ for IMAGE in "${IMAGES[@]}"; do
   export DATABASE_URL="postgres://postgres:password@127.0.0.1:$PORT/grizzle_test?sslmode=disable"
   export POSTGRES_DSN="$DATABASE_URL"
 
-  echo "==> Running ALL integration tests against $IMAGE..."
-  go test -tags integration -count=1 ./...
+  echo "==> Running ALL integration tests against $IMAGE with -race..."
+  go test -tags integration -race -count=1 ./...
 
   echo "==> Stopping $CONTAINER_NAME..."
   docker stop "$CONTAINER_NAME" > /dev/null 2>&1 || true

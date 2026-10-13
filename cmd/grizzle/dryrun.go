@@ -13,7 +13,7 @@ import (
 
 // runDryRunApply verifies the planned DDL against live data without
 // persisting any change (live dry-run rollback verification).
-func runDryRunApply(ctx context.Context, db *sql.DB, planFile, schemaFile, rolesSQL, catalogSQL string, allowDrop bool, acceptedCodes []grizzle.HazardCode, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc) int {
+func runDryRunApply(ctx context.Context, db *sql.DB, planFile, schemaFile, devURL, rolesSQL, catalogSQL string, allowDrop bool, acceptedCodes []grizzle.HazardCode, renames map[string]string, expandContract bool, backfill grizzle.BackfillFunc) int {
 	if planFile != "" {
 		planData, err := os.ReadFile(filepath.Clean(planFile)) //nolint:gosec // G304: CLI accepts user-provided plan file path
 		if err != nil {
@@ -26,9 +26,10 @@ func runDryRunApply(ctx context.Context, db *sql.DB, planFile, schemaFile, roles
 			return 2
 		}
 		res, err := grizzle.DryRunVerifyPlan(ctx, db, p, grizzle.ApplyOpts{
-			ExpectedHash:  recordedHash,
-			AcceptHazards: acceptedCodes,
-			Backfill:      backfill,
+			ExpectedHash:   recordedHash,
+			AcceptHazards:  acceptedCodes,
+			Backfill:       backfill,
+			DevDatabaseURL: devURL,
 		})
 		if err != nil {
 			slog.Error("dry-run verification failed", "err", err)
@@ -46,6 +47,7 @@ func runDryRunApply(ctx context.Context, db *sql.DB, planFile, schemaFile, roles
 	}
 	opts := grizzle.Options{
 		SchemaSQL:      string(content),
+		DevDatabaseURL: devURL,
 		RolesSQL:       rolesSQL,
 		CatalogSQL:     catalogSQL,
 		AllowDrop:      allowDrop,

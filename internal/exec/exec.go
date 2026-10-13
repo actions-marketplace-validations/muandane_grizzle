@@ -72,6 +72,16 @@ type PostgresExecConfig struct {
 	// ExecuteHooksInDryRun allows BeforeStep/AfterStep hooks to run inside the
 	// dry-run sandbox. Defaults to false to avoid external side effects.
 	ExecuteHooksInDryRun bool
+	// DevDB is an optional external database connection used exclusively for
+	// shadow-schema compilation (the always-rolled-back transaction). When
+	// non-nil, shadow transactions open against DevDB instead of the target
+	// database. Live catalog introspection always uses the target db passed to
+	// the calling function. DevDB is never written to outside of the rolled-back
+	// shadow transaction.
+	DevDB *sql.DB
+	// ShadowDBTX is an optional DBTX used by DiffPostgres to inspect the shadow
+	// schema. If nil, dbtx is used for both live and shadow inspection.
+	ShadowDBTX dialect.DBTX
 }
 
 func (cfg PostgresExecConfig) targetSchemas() []string {
@@ -144,7 +154,11 @@ func DiffPostgres(ctx context.Context, dbtx dialect.DBTX, cfg PostgresExecConfig
 			return nil, fmt.Errorf("%w: live schema: %w", plan.ErrInspectionFailed, err)
 		}
 
-		desired, err := inspectPostgresSchema(ctx, dbtx, shadowSchema, cfg.Tracer)
+		shadowDBTX := dbtx
+		if cfg.ShadowDBTX != nil {
+			shadowDBTX = cfg.ShadowDBTX
+		}
+		desired, err := inspectPostgresSchema(ctx, shadowDBTX, shadowSchema, cfg.Tracer)
 		if err != nil {
 			return nil, fmt.Errorf("%w: shadow schema: %w", plan.ErrInspectionFailed, err)
 		}
@@ -185,7 +199,11 @@ func DiffPostgres(ctx context.Context, dbtx dialect.DBTX, cfg PostgresExecConfig
 		return nil, fmt.Errorf("%w: live schemas: %w", plan.ErrInspectionFailed, err)
 	}
 
-	desiredMap, err := inspectPostgresSchemas(ctx, dbtx, shadowSchemas, cfg.Tracer)
+	shadowDBTX := dbtx
+	if cfg.ShadowDBTX != nil {
+		shadowDBTX = cfg.ShadowDBTX
+	}
+	desiredMap, err := inspectPostgresSchemas(ctx, shadowDBTX, shadowSchemas, cfg.Tracer)
 	if err != nil {
 		return nil, fmt.Errorf("%w: shadow schemas: %w", plan.ErrInspectionFailed, err)
 	}
@@ -571,9 +589,19 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 
 	// 2. Setup shadow schema and diff schemas inside an isolated transaction
 	shadowStart := time.Now()
-	shadowTx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-	if err != nil {
-		return 0, fmt.Errorf("grizzle: failed to begin shadow tx: %w", err)
+	var shadowTx *sql.Tx
+	if cfg.DevDB != nil {
+		var err error
+		shadowTx, err = cfg.DevDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		if err != nil {
+			return 0, fmt.Errorf("grizzle: failed to begin shadow tx on dev database: %w", err)
+		}
+	} else {
+		var err error
+		shadowTx, err = conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		if err != nil {
+			return 0, fmt.Errorf("grizzle: failed to begin shadow tx: %w", err)
+		}
 	}
 	defer func() { _ = shadowTx.Rollback() }()
 
@@ -593,7 +621,7 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 		shadowSchemas = []string{shadowSchema}
 
 		if err := postgres.SetupShadowSchema(ctx, shadowTx, shadowSchema); err != nil {
-			return 0, err
+			return 0, wrapShadowSetupError(err, cfg.DevDB != nil)
 		}
 
 		if err := postgres.RunShadowDDL(ctx, shadowTx, shadowSchema, primarySchema, schemaGroups.ShadowSQL); err != nil {
@@ -609,7 +637,7 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 		}
 
 		if err := postgres.SetupShadowSchemas(ctx, shadowTx, shadowSchemas); err != nil {
-			return 0, err
+			return 0, wrapShadowSetupError(err, cfg.DevDB != nil)
 		}
 
 		if err := postgres.RunMultiShadowDDL(ctx, shadowTx, shadowMap, targetSchemas, schemaGroups.ShadowSQL); err != nil {
@@ -624,7 +652,9 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 	}
 
 	// 3. Diff schemas post-lock
-	steps, err := DiffPostgres(ctx, shadowTx, cfg)
+	diffCfg := cfg
+	diffCfg.ShadowDBTX = shadowTx
+	steps, err := DiffPostgres(ctx, conn, diffCfg)
 	if err != nil {
 		return 0, err
 	}
@@ -656,7 +686,11 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 		if logger != nil {
 			logger.InfoContext(ctx, "grizzle: schema is already in sync", "duration", time.Since(start))
 		}
-		_ = postgres.DropShadowSchemas(ctx, conn, shadowSchemas)
+		if cfg.DevDB != nil {
+			_ = postgres.DropShadowSchemas(ctx, cfg.DevDB, shadowSchemas)
+		} else {
+			_ = postgres.DropShadowSchemas(ctx, conn, shadowSchemas)
+		}
 		return 0, nil
 	}
 
@@ -890,7 +924,19 @@ func PlanDiffPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) (
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	_ = ApplyTxTimeouts(ctx, tx, cfg.LockTimeout, cfg.StatementTimeout)
+	var shadowTx *sql.Tx
+	if cfg.DevDB != nil {
+		var err error
+		shadowTx, err = cfg.DevDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		if err != nil {
+			return nil, fmt.Errorf("grizzle: failed to begin shadow tx on dev database: %w", err)
+		}
+		defer func() { _ = shadowTx.Rollback() }()
+	} else {
+		shadowTx = tx
+	}
+
+	_ = ApplyTxTimeouts(ctx, shadowTx, cfg.LockTimeout, cfg.StatementTimeout)
 
 	schemaGroups, err := splitSchemaSQL(cfg.SchemaSQL)
 	if err != nil {
@@ -905,12 +951,12 @@ func PlanDiffPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) (
 		}
 		shadowSchemas = []string{shadowSchema}
 
-		if err := postgres.SetupShadowSchema(ctx, tx, shadowSchema); err != nil {
-			return nil, err
+		if err := postgres.SetupShadowSchema(ctx, shadowTx, shadowSchema); err != nil {
+			return nil, wrapShadowSetupError(err, cfg.DevDB != nil)
 		}
-		defer func() { _ = postgres.DropShadowSchema(context.Background(), tx, shadowSchema) }()
+		defer func() { _ = postgres.DropShadowSchema(context.Background(), shadowTx, shadowSchema) }()
 
-		if err := postgres.RunShadowDDL(ctx, tx, shadowSchema, primarySchema, schemaGroups.ShadowSQL); err != nil {
+		if err := postgres.RunShadowDDL(ctx, shadowTx, shadowSchema, primarySchema, schemaGroups.ShadowSQL); err != nil {
 			return nil, fmt.Errorf("%w: %w", plan.ErrCompilationFailed, err)
 		}
 	} else {
@@ -919,17 +965,19 @@ func PlanDiffPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) (
 			shadowSchemas = append(shadowSchemas, shadow)
 		}
 
-		if err := postgres.SetupShadowSchemas(ctx, tx, shadowSchemas); err != nil {
-			return nil, err
+		if err := postgres.SetupShadowSchemas(ctx, shadowTx, shadowSchemas); err != nil {
+			return nil, wrapShadowSetupError(err, cfg.DevDB != nil)
 		}
-		defer func() { _ = postgres.DropShadowSchemas(context.Background(), tx, shadowSchemas) }()
+		defer func() { _ = postgres.DropShadowSchemas(context.Background(), shadowTx, shadowSchemas) }()
 
-		if err := postgres.RunMultiShadowDDL(ctx, tx, shadowMap, targetSchemas, schemaGroups.ShadowSQL); err != nil {
+		if err := postgres.RunMultiShadowDDL(ctx, shadowTx, shadowMap, targetSchemas, schemaGroups.ShadowSQL); err != nil {
 			return nil, fmt.Errorf("%w: %w", plan.ErrCompilationFailed, err)
 		}
 	}
 
-	steps, err := DiffPostgres(ctx, tx, cfg)
+	diffCfg := cfg
+	diffCfg.ShadowDBTX = shadowTx
+	steps, err := DiffPostgres(ctx, tx, diffCfg)
 	if err != nil {
 		return nil, err
 	}
