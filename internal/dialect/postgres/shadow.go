@@ -50,6 +50,9 @@ func RunShadowDDL(ctx context.Context, dbtx dialect.DBTX, shadowSchema, targetSc
 	if err := ValidateIdentifier(shadowSchema); err != nil {
 		return err
 	}
+	if targetSchema == "" {
+		targetSchema = "public"
+	}
 	if err := ValidateIdentifier(targetSchema); err != nil {
 		return err
 	}
@@ -59,13 +62,15 @@ func RunShadowDDL(ctx context.Context, dbtx dialect.DBTX, shadowSchema, targetSc
 		return fmt.Errorf("failed setting search_path to %q: %w", shadowSchema, err)
 	}
 
+	shadowMap := map[string]string{targetSchema: shadowSchema}
+
 	// Strip CREATE EXTENSION from the main DDL body, then best-effort install
 	// into the shadow schema so extension-provided types (citext, etc.) resolve
 	// during compile. Failures are ignored per statement (privilege / already
 	// installed); the desired Extensions IR comes from statement parsing.
 	cleanedSQL, extStmts := schema.StripExtensionStatements(schemaSQL)
 	for _, extStmt := range extStmts {
-		rewritten := rewriteExtensionSchema(extStmt, shadowSchema)
+		rewritten := rewriteExtensionSchema(RewriteShadowSQL(extStmt, shadowMap), shadowSchema)
 		_, _ = dbtx.ExecContext(ctx, rewritten)
 	}
 
@@ -77,7 +82,8 @@ func RunShadowDDL(ctx context.Context, dbtx dialect.DBTX, shadowSchema, targetSc
 		}
 	}
 	if strings.TrimSpace(ddlSQL) != "" {
-		if _, err := dbtx.ExecContext(ctx, ddlSQL); err != nil {
+		rewrittenSQL := RewriteShadowSQL(ddlSQL, shadowMap)
+		if _, err := dbtx.ExecContext(ctx, rewrittenSQL); err != nil {
 			return fmt.Errorf("schema compilation in shadow schema failed: %w", WrapShadowCompileError(err, schemaSQL))
 		}
 	}
@@ -291,6 +297,21 @@ func isWhitespace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
 
+func lookupShadow(shadowMap map[string]string, name string) (string, bool) {
+	if s, ok := shadowMap[name]; ok {
+		return s, true
+	}
+	if s, ok := shadowMap[strings.ToLower(name)]; ok {
+		return s, true
+	}
+	for k, v := range shadowMap {
+		if strings.EqualFold(k, name) {
+			return v, true
+		}
+	}
+	return "", false
+}
+
 // RewriteShadowSQL redirects references to target schemas in SQL to their corresponding shadow schemas.
 func RewriteShadowSQL(sqlStr string, shadowMap map[string]string) string {
 	if len(shadowMap) == 0 {
@@ -363,16 +384,16 @@ func RewriteShadowSQL(sqlStr string, shadowMap map[string]string) string {
 			ident := sqlStr[start+1 : i-1]
 			// Check if followed by dot .
 			if i < n && sqlStr[i] == '.' {
-				if shadow, ok := shadowMap[ident]; ok {
+				if shadow, ok := lookupShadow(shadowMap, ident); ok {
 					fmt.Fprintf(&b, "%q.", shadow)
 					i++ // consume .
 					prevWord = ident
 					continue
 				}
 			}
-			// Check if preceded by SCHEMA (e.g. CREATE SCHEMA "billing")
-			if strings.EqualFold(prevWord, "SCHEMA") {
-				if shadow, ok := shadowMap[ident]; ok {
+			// Check if preceded by SCHEMA (e.g. CREATE SCHEMA "billing" or CREATE SCHEMA IF NOT EXISTS "billing")
+			if strings.EqualFold(prevWord, "SCHEMA") || strings.EqualFold(prevWord, "EXISTS") {
+				if shadow, ok := lookupShadow(shadowMap, ident); ok {
 					fmt.Fprintf(&b, "%q", shadow)
 					prevWord = ident
 					continue
@@ -393,7 +414,7 @@ func RewriteShadowSQL(sqlStr string, shadowMap map[string]string) string {
 
 			// Check if followed by dot .
 			if i < n && sqlStr[i] == '.' {
-				if shadow, ok := shadowMap[word]; ok {
+				if shadow, ok := lookupShadow(shadowMap, word); ok {
 					b.WriteString(shadow)
 					b.WriteByte('.')
 					i++ // consume .
@@ -404,7 +425,7 @@ func RewriteShadowSQL(sqlStr string, shadowMap map[string]string) string {
 
 			// Check if preceded by SCHEMA (e.g. CREATE SCHEMA billing or CREATE SCHEMA IF NOT EXISTS billing)
 			if strings.EqualFold(prevWord, "SCHEMA") || strings.EqualFold(prevWord, "EXISTS") {
-				if shadow, ok := shadowMap[word]; ok {
+				if shadow, ok := lookupShadow(shadowMap, word); ok {
 					b.WriteString(shadow)
 					prevWord = word
 					continue

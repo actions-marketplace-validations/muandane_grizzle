@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -522,5 +523,143 @@ func TestRunMultiShadowDDL_ErrorWrapping(t *testing.T) {
 	}
 	if !strings.Contains(msg, "hint: verify table creation order or schema qualification") {
 		t.Errorf("expected hint in error, got: %s", msg)
+	}
+}
+
+type mockRecordingDBTX struct {
+	queries []string
+}
+
+func (m *mockRecordingDBTX) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	m.queries = append(m.queries, query)
+	return nil, nil
+}
+
+func (m *mockRecordingDBTX) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return nil, nil
+}
+
+func (m *mockRecordingDBTX) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return nil
+}
+
+func TestRunShadowDDL_RewritesTargetSchemaQualifiers(t *testing.T) {
+	dbtx := &mockRecordingDBTX{}
+	sqlStr := `CREATE FUNCTION public.check_payment_allocations_total() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$;
+CREATE TABLE public.customers (id uuid PRIMARY KEY);
+CREATE TRIGGER tg_customers_handle_updated_at BEFORE UPDATE ON public.customers FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
+ALTER TABLE public.customers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY customer_org_isolation ON public.customers USING (true);`
+
+	err := postgres.RunShadowDDL(context.Background(), dbtx, "_grizzle_shadow", "public", sqlStr)
+	if err != nil {
+		t.Fatalf("expected RunShadowDDL to succeed, got %v", err)
+	}
+
+	if len(dbtx.queries) < 3 {
+		t.Fatalf("expected at least 3 queries, got %d", len(dbtx.queries))
+	}
+
+	execSQL := dbtx.queries[1]
+	if strings.Contains(execSQL, "public.check_payment_allocations_total") {
+		t.Errorf("execSQL still contains 'public.check_payment_allocations_total': %s", execSQL)
+	}
+	if !strings.Contains(execSQL, "_grizzle_shadow.check_payment_allocations_total") {
+		t.Errorf("execSQL missing '_grizzle_shadow.check_payment_allocations_total': %s", execSQL)
+	}
+	if strings.Contains(execSQL, "public.customers") {
+		t.Errorf("execSQL still contains 'public.customers': %s", execSQL)
+	}
+	if !strings.Contains(execSQL, "_grizzle_shadow.customers") {
+		t.Errorf("execSQL missing '_grizzle_shadow.customers': %s", execSQL)
+	}
+	if !strings.Contains(execSQL, "ON _grizzle_shadow.customers") {
+		t.Errorf("execSQL missing 'ON _grizzle_shadow.customers': %s", execSQL)
+	}
+	if !strings.Contains(execSQL, "EXECUTE FUNCTION _grizzle_shadow.handle_updated_at") {
+		t.Errorf("execSQL missing 'EXECUTE FUNCTION _grizzle_shadow.handle_updated_at': %s", execSQL)
+	}
+}
+
+func TestRewriteShadowSQL_SingleSchemaQualified(t *testing.T) {
+	shadowMap := map[string]string{
+		"public": "_grizzle_shadow",
+	}
+
+	input := `CREATE FUNCTION public.check_payment_allocations_total() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN RETURN NULL; END; $$;
+COMMENT ON FUNCTION public.document_invoice_payable_minor(p_currency text) IS 'Invoice amount';
+CREATE TABLE public.customer_portal_members (
+    id uuid NOT NULL,
+    organization_id uuid REFERENCES public.organizations(id)
+);
+CREATE FUNCTION public.lookup_portal() RETURNS SETOF public.customer_portal_members
+    AS $$ SELECT * FROM public.customer_portal_members; $$;
+CREATE TABLE "public"."quoted_table" (
+    id INT REFERENCES "public"."other"(id)
+);
+CREATE VIEW PUBLIC.active_view AS SELECT * FROM public.customer_portal_members;
+COMMENT ON COLUMN public.customer_portal_members.id IS 'ID col';
+CREATE POLICY org_isolation ON public.customer_portal_members TO public USING (true);`
+
+	expected := `CREATE FUNCTION _grizzle_shadow.check_payment_allocations_total() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ BEGIN RETURN NULL; END; $$;
+COMMENT ON FUNCTION _grizzle_shadow.document_invoice_payable_minor(p_currency text) IS 'Invoice amount';
+CREATE TABLE _grizzle_shadow.customer_portal_members (
+    id uuid NOT NULL,
+    organization_id uuid REFERENCES _grizzle_shadow.organizations(id)
+);
+CREATE FUNCTION _grizzle_shadow.lookup_portal() RETURNS SETOF _grizzle_shadow.customer_portal_members
+    AS $$ SELECT * FROM _grizzle_shadow.customer_portal_members; $$;
+CREATE TABLE "_grizzle_shadow"."quoted_table" (
+    id INT REFERENCES "_grizzle_shadow"."other"(id)
+);
+CREATE VIEW _grizzle_shadow.active_view AS SELECT * FROM _grizzle_shadow.customer_portal_members;
+COMMENT ON COLUMN _grizzle_shadow.customer_portal_members.id IS 'ID col';
+CREATE POLICY org_isolation ON _grizzle_shadow.customer_portal_members TO public USING (true);`
+
+	got := postgres.RewriteShadowSQL(input, shadowMap)
+	if got != expected {
+		t.Errorf("RewriteShadowSQL mismatch:\ngot:\n%s\nwant:\n%s", got, expected)
+	}
+}
+
+func TestRewriteShadowSQL_NovaSchema(t *testing.T) {
+	novaPath := "/Users/zine/Developer/simplified/sanad/apps/nova/internal/db/schema/schema.sql"
+	data, err := os.ReadFile(novaPath)
+	if err != nil {
+		t.Skipf("skipping local Nova schema test: %v", err)
+	}
+
+	shadowMap := map[string]string{
+		"public": "_grizzle_shadow",
+	}
+
+	rewritten := postgres.RewriteShadowSQL(string(data), shadowMap)
+
+	// Specifically verify that public.check_payment_allocations_total() is rewritten
+	if strings.Contains(rewritten, "public.check_payment_allocations_total") {
+		t.Errorf("rewritten Nova schema still contains 'public.check_payment_allocations_total'")
+	}
+	if !strings.Contains(rewritten, "_grizzle_shadow.check_payment_allocations_total") {
+		t.Errorf("rewritten Nova schema missing '_grizzle_shadow.check_payment_allocations_total'")
+	}
+
+	// Verify tables are rewritten
+	if strings.Contains(rewritten, "CREATE TABLE public.customer_portal_members") {
+		t.Errorf("rewritten Nova schema still contains 'CREATE TABLE public.customer_portal_members'")
+	}
+	if !strings.Contains(rewritten, "CREATE TABLE _grizzle_shadow.customer_portal_members") {
+		t.Errorf("rewritten Nova schema missing 'CREATE TABLE _grizzle_shadow.customer_portal_members'")
+	}
+
+	// Verify triggers are rewritten
+	if strings.Contains(rewritten, "EXECUTE FUNCTION public.handle_updated_at") {
+		t.Errorf("rewritten Nova schema still contains 'EXECUTE FUNCTION public.handle_updated_at'")
+	}
+	if !strings.Contains(rewritten, "EXECUTE FUNCTION _grizzle_shadow.handle_updated_at") {
+		t.Errorf("rewritten Nova schema missing 'EXECUTE FUNCTION _grizzle_shadow.handle_updated_at'")
 	}
 }
