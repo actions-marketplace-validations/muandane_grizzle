@@ -180,7 +180,7 @@ grizzle export --plan plan.json --format migrate --out ./migrations
 * [CONTRIBUTING](CONTRIBUTING.md) — devenv, hooks, PR checklist
 * [CHANGELOG](CHANGELOG.md)
 
-Current tag: **v0.1.0-rc4**.
+Current tag: **v0.1.0**.
 
 ## License
 

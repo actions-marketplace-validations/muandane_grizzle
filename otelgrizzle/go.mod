@@ -3,7 +3,7 @@ module github.com/muandane/grizzle/otelgrizzle
 go 1.27.1
 
 require (
-	github.com/muandane/grizzle v0.1.0-rc4
+	github.com/muandane/grizzle v0.1.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	modernc.org/sqlite v1.60.1
