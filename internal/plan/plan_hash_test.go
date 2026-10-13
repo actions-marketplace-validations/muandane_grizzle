@@ -297,3 +297,125 @@ func TestPlan_Hash_StagedEvolutionGolden(t *testing.T) {
 		})
 	}
 }
+
+// TestPlan_Hash_AllStepKindsGolden verifies that every ChangeType produces a stable,
+// deterministic hash, freezing the contract for v0.1.0 GA across all 71 atomic step kinds.
+func TestPlan_Hash_AllStepKindsGolden(t *testing.T) {
+	t.Parallel()
+
+	allStepKinds := []plan.ChangeType{
+		plan.ChangeCreateEnum,
+		plan.ChangeAlterEnum,
+		plan.ChangeRenameEnumValue,
+		plan.ChangeDropEnumValue,
+		plan.ChangeCreateTable,
+		plan.ChangeDropTable,
+		plan.ChangeAddColumn,
+		plan.ChangeDropColumn,
+		plan.ChangeAlterColumn,
+		plan.ChangeRenameColumn,
+		plan.ChangeCreateIndex,
+		plan.ChangeDropIndex,
+		plan.ChangeAddFK,
+		plan.ChangeDropFK,
+		plan.ChangeAddCheck,
+		plan.ChangeDropCheck,
+		plan.ChangeValidateConstraint,
+		plan.ChangeAttachPartition,
+		plan.ChangeDetachPartition,
+		plan.ChangeCreateExtension,
+		plan.ChangeDropExtension,
+		plan.ChangeEnableRLS,
+		plan.ChangeDisableRLS,
+		plan.ChangeForceRLS,
+		plan.ChangeNoForceRLS,
+		plan.ChangeCreatePolicy,
+		plan.ChangeAlterPolicy,
+		plan.ChangeDropPolicy,
+		plan.ChangeCreateFunction,
+		plan.ChangeDropFunction,
+		plan.ChangeCreateAggregate,
+		plan.ChangeDropAggregate,
+		plan.ChangeCreateDomain,
+		plan.ChangeAlterDomain,
+		plan.ChangeDropDomainConstraint,
+		plan.ChangeDropDomain,
+		plan.ChangeDropDomainRetype,
+		plan.ChangeCreateRangeType,
+		plan.ChangeDropRangeType,
+		plan.ChangeDropRangeRetype,
+		plan.ChangeCreateCompositeType,
+		plan.ChangeAlterCompositeType,
+		plan.ChangeDropCompositeType,
+		plan.ChangeDropCompositeRetype,
+		plan.ChangeCreateSequence,
+		plan.ChangeAlterSequence,
+		plan.ChangeDropSequence,
+		plan.ChangeCreateTrigger,
+		plan.ChangeDropTrigger,
+		plan.ChangeCreateView,
+		plan.ChangeDropView,
+		plan.ChangeRefreshMatView,
+		plan.ChangeCommentTable,
+		plan.ChangeCommentColumn,
+		plan.ChangeGrant,
+		plan.ChangeRevoke,
+		plan.ChangeCreateRole,
+		plan.ChangeAlterRole,
+		plan.ChangeRoleComment,
+		plan.ChangeDropRole,
+		plan.ChangeCreatePublication,
+		plan.ChangeAlterPublication,
+		plan.ChangeDropPublication,
+		plan.ChangeCreateSubscription,
+		plan.ChangeAlterSubscription,
+		plan.ChangeDropSubscription,
+		plan.ChangeCreateReplicationSlot,
+		plan.ChangeDropReplicationSlot,
+		plan.ChangeCreateEventTrigger,
+		plan.ChangeAlterEventTrigger,
+		plan.ChangeDropEventTrigger,
+	}
+
+	if len(allStepKinds) != 71 {
+		t.Fatalf("expected exactly 71 ChangeTypes, got %d", len(allStepKinds))
+	}
+
+	steps := make([]plan.Step, len(allStepKinds))
+	for i, kind := range allStepKinds {
+		steps[i] = plan.Step{
+			Type:  kind,
+			Table: "canonical_table",
+			SQL:   "-- step: " + string(kind) + ";",
+		}
+	}
+
+	p := &plan.Plan{
+		TargetSchema:  "public",
+		TargetSchemas: []string{"public"},
+		Steps:         steps,
+	}
+
+	const wantGoldenAllSteps = "ec683a9b2ce3cb1869933916df41bf66926c98403e68790a562b88b11736b27f"
+
+	got := p.Hash()
+	if got != wantGoldenAllSteps {
+		t.Fatalf("golden hash mismatch for all 71 step kinds:\ngot:  %s\nwant: %s", got, wantGoldenAllSteps)
+	}
+
+	// JSON roundtrip verification
+	data, err := p.ToJSON()
+	if err != nil {
+		t.Fatalf("ToJSON failed: %v", err)
+	}
+	parsed, envHash, err := plan.ParsePlanJSON(data)
+	if err != nil {
+		t.Fatalf("ParsePlanJSON failed: %v", err)
+	}
+	if envHash != got {
+		t.Fatalf("envelope hash %s != original %s", envHash, got)
+	}
+	if parsed.Hash() != got {
+		t.Fatalf("parsed plan hash %s != original %s", parsed.Hash(), got)
+	}
+}

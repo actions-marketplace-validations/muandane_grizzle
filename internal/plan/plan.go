@@ -310,6 +310,13 @@ type Plan struct {
 }
 
 // Hash computes a deterministic SHA-256 hex digest of the canonical step list and scope.
+//
+// CONTRACT FREEZE (v0.1.0 GA):
+// The output format, serialization order, and participating fields of Hash() are
+// strictly frozen. Any modification to the hash algorithm or payload structure is
+// a breaking change: ExpectedHash approvals, drift detection, and grizzle_history
+// idempotency checks rely on permanent digest stability across versions. Never
+// alter the hashing format or omit fields without an explicit major version increment.
 func (p *Plan) Hash() string {
 	h := sha256.New()
 
