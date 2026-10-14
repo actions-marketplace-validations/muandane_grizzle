@@ -498,6 +498,8 @@ type Hazard struct {
 
 ## 3. Supported schema constructs
 
+For a high-level capability matrix and safety guards overview, see [docs/FEATURES.md](FEATURES.md).
+
 ### PostgreSQL
 
 | Construct | Supported | Notes |

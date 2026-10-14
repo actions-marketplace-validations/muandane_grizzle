@@ -6,19 +6,19 @@
 
 Declarative schema migrations for Go.
 
-Point Grizzle at your plain `schema.sql`, and it diffs and migrates your database on boot. No numbered migration files (`001_init.sql`), no external migration binaries inside your production containers.
+Grizzle compares your live database against a plain `schema.sql` file and applies the required DDL on boot. You define the desired schema, and Grizzle calculates the minimal safe migration plan, eliminating numbered migration files (`001_init.sql`) and external migration binaries in production containers.
 
 - **Safe by default:** Destructive drops are blocked unless explicitly allowed.
-- **Production-safe DDL:** Builds PostgreSQL indexes `CONCURRENTLY` and creates foreign keys as `NOT VALID` before validating.
-- **Cluster-safe:** Uses PostgreSQL session advisory locks so multi-pod deployments won't collide.
-- **Engine support:** PostgreSQL (14–18) and SQLite (3.35+, pure-Go or CGo).
-- **Works with sqlc:** Share one `schema.sql` between sqlc and Grizzle.
+- **Production-safe DDL:** Builds PostgreSQL indexes with `CONCURRENTLY` and validates foreign keys in separate stages.
+- **Cluster coordination:** Uses session-level PostgreSQL advisory locks so multiple replicas boot safely without race conditions.
+- **Engine support:** PostgreSQL (14 to 18) and SQLite (3.35+, pure-Go or CGo).
+- **Tooling compatibility:** Shares the same `schema.sql` file with code generators like sqlc.
 
 ---
 
 ## Quickstart
 
-Embed your desired schema and run `Sync` on application startup:
+### 1. Define your desired schema
 
 ```sql
 -- schema.sql
@@ -32,8 +32,11 @@ CREATE TABLE users (
 CREATE INDEX idx_users_created_at ON users (created_at);
 ```
 
-> **Note:** Grizzle supports both `SERIAL` and standard-compliant identity columns, but recommends `GENERATED ALWAYS AS IDENTITY` for new tables (see [SAFETY.md](docs/SAFETY.md)).
+Grizzle supports both `SERIAL` and `GENERATED ALWAYS AS IDENTITY` columns (recommended; see [docs/SAFETY.md](docs/SAFETY.md)).
 
+### 2. Run sync on boot
+
+Embed `schema.sql` and call `grizzle.Sync` during application startup:
 
 ```go
 package main
@@ -62,7 +65,7 @@ func main() {
 	// Bring the database in line with schema.sql
 	err = grizzle.Sync(context.Background(), db, grizzle.Options{
 		SchemaSQL:        schemaSQL,
-		AllowDrop:        false, // Fails if the diff would drop columns or tables
+		AllowDrop:        false, // Fails if the diff requires dropping tables or columns
 		LockTimeout:      5 * time.Second,
 		StatementTimeout: 2 * time.Minute,
 	})
@@ -72,7 +75,22 @@ func main() {
 }
 ```
 
-> **Need approval gates?** Instead of auto-syncing on boot, use `grizzle.PlanDiff(...)` to generate a migration plan, review the SQL, then `grizzle.Apply(..., grizzle.ApplyOpts{ExpectedHash: plan.Hash()})` so apply aborts if the live database drifted.
+### Staged planning and approval workflows
+
+For CI pipelines or approval gates where changes must be reviewed before execution:
+
+```go
+// 1. Generate the migration plan without applying changes
+plan, err := grizzle.PlanDiff(ctx, db, opts)
+if err != nil {
+    log.Fatal(err)
+}
+
+// 2. Apply the plan safely; aborts if the live database changed since planning
+err = grizzle.Apply(ctx, db, plan, grizzle.ApplyOpts{
+    ExpectedHash: plan.Hash(),
+})
+```
 
 ---
 
@@ -84,52 +102,52 @@ func main() {
 go install github.com/muandane/grizzle/cmd/grizzle@latest
 ```
 
-Pre-compiled binaries for Linux, macOS, and Windows are also available on [GitHub Releases](https://github.com/muandane/grizzle/releases).
+Pre-compiled binaries for Linux, macOS, and Windows are available on [GitHub Releases](https://github.com/muandane/grizzle/releases).
 
 ### Usage
 
-Use the CLI for CI drift checks, dry runs, or exporting plans to standard migration tools:
+Use the CLI for dry runs, CI drift detection, or offline linting:
 
 ```bash
 # Preview changes and generate a migration plan
 grizzle plan --dsn "$DATABASE_URL" --schema schema.sql --out plan.json
 
-# Use an external dev database URL if target DB lacks CREATE SCHEMA
+# Use an external dev database if the target database user cannot run CREATE SCHEMA
 grizzle plan --dsn "$DATABASE_URL" --dev-url "$DEV_DATABASE_URL" --schema schema.sql
 
-# Apply a generated plan safely
+# Apply a generated plan
 grizzle apply --dsn "$DATABASE_URL" --plan plan.json
 
 # Inspect migration status and history
 grizzle status --dsn "$DATABASE_URL" --schema schema.sql
 grizzle history --dsn "$DATABASE_URL"
 
-# Reverse engineer an existing database and baseline it
+# Dump the current database schema and baseline it
 grizzle dump --dsn "$DATABASE_URL" --out schema.sql
 grizzle baseline --dsn "$DATABASE_URL" --schema schema.sql
 
-# Resolve an interrupted or failed migration
+# Mark an interrupted migration as resolved
 grizzle repair --dsn "$DATABASE_URL" --note "manually resolved"
 
-# Statically lint schema.sql offline (pure in-memory shadow, no DB connection needed)
+# Lint schema.sql offline
 grizzle lint --schema schema.sql
 
 # Run strict linting with GitHub Actions annotations in CI
 grizzle lint --schema schema.sql --profile strict --format github --fail-on-warning
 
-# Convert a plan to Goose or golang-migrate migrations if you need an exit hatch
+# Export plans to Goose or golang-migrate SQL files
 grizzle export --plan plan.json --format goose --out ./migrations
 grizzle export --plan plan.json --format migrate --out ./migrations
 ```
 
-### Exit Codes
+### Exit codes
 
 | Code | Meaning |
-| --- | --- |
+| :--- | :--- |
 | `0` | Success / database is in sync |
 | `1` | Connection or execution error (or drift detected in `status`) |
-| `2` | Blocked by an unaccepted hazard (e.g., unexpected DROP) |
-| `3` | Plan hash mismatch (live database changed after plan was generated) |
+| `2` | Blocked by an unaccepted hazard (such as an unexpected `DROP`) |
+| `3` | Plan hash mismatch (database drifted after plan was generated) |
 | `4` | Schema drift detected (`grizzle check`) |
 
 ### GitHub Actions Integration
@@ -167,60 +185,47 @@ jobs:
 
 ---
 
-## Supported Features
+## Supported engines
 
-### PostgreSQL (14–18)
+- **PostgreSQL (14 to 18):** Tables, partitioned tables, concurrent indexes, foreign keys, check constraints, enums, domains, composite types, routines, triggers, views, row-level security, sequences, extensions, and logical replication.
+- **SQLite (3.35+):** Tables, columns, indexes, foreign keys, check constraints, and generated columns. Unsupported in-place alters run through an automatic 12-step table rebuild. Compatible with `modernc.org/sqlite` (pure Go) and `mattn/go-sqlite3` (CGo).
 
-| Category | Supported Capabilities | Safety & Scope Guards |
-| :--- | :--- | :--- |
-| **Tables & Columns** | Table creation/drop, column add/drop/rename, type alters (`USING`), nullability, defaults, generated columns, partitioned tables (declarative attach/detach). | Identity and serial sequences preserved; unmanaged tables outside target schema untouched. |
-| **Indexes & Constraints** | `CREATE INDEX CONCURRENTLY`, partial/unique/expression/BRIN/GIN/GiST indexes; foreign keys (`NOT VALID` + `VALIDATE`), `CHECK` constraints (staged validation, normalized expressions). | Backing indexes for primary keys and unique constraints managed via constraint definition. |
-| **Data Types** | Enums (`ADD VALUE`, `RENAME VALUE`), domains (`CHECK` constraints), custom range types, composite types (`ADD`/`DROP ATTRIBUTE`). | System and extension types preserved; dropped enum values flagged as critical hazards. |
-| **Sequences** | Standalone sequences, parameters (`INCREMENT`, `MIN`/`MAXVALUE`, `CACHE`, `CYCLE`), ownership (`OWNED BY table.col`), `DROP SEQUENCE IF EXISTS`. | Implicit identity/serial sequences and unmanaged external sequences are preserved. |
-| **Routines & Triggers** | Functions and procedures (`CREATE OR REPLACE`, signature drift drop/recreate), per-table triggers, user-defined aggregates. | Built-in and extension functions untouched; window functions and hypothetical aggregates preserved. |
-| **Views** | Standard views (`CREATE OR REPLACE` for append-only, drop/recreate for structural alters), materialized views (drop/recreate + refresh). | System catalogs and unmanaged views untouched. |
-| **Security & Access** | Row-Level Security (`ENABLE`/`FORCE`), RLS policies (`CREATE`/`ALTER`/`DROP POLICY`), roles and grants (via `RolesSQL` / `SchemaSQL`). | Unmanaged roles and `PUBLIC` grants preserved; marker comment `grizzle-managed` required to drop roles. |
-| **Cluster & Replication** | Extensions (`CREATE EXTENSION`), logical publications, subscriptions, replication slots, DDL event triggers. | Physical slots and unmanaged publications/triggers without `grizzle-managed` marker are untouched. |
-
-> [!NOTE]
-> Plan hashes (`Plan.Hash()`) are deterministic across versions. Detailed catalog queries, hazard taxonomy, and engine internals are documented in [docs/SPEC.md](docs/SPEC.md).
-
-### SQLite (3.35+)
-
-* Tables, columns, foreign keys, `CHECK` constraints, indexes, and generated columns.
-* Automatic 12-step table rebuilds for schema changes SQLite cannot execute in-place via `ALTER TABLE`.
-* Supports both `modernc.org/sqlite` (pure Go) and `mattn/go-sqlite3` (CGo).
-* SQLite does not support `COMMENT ON` or Row-Level Security (PostgreSQL-only).
+For the full feature matrix, safety guards, and catalog details, see [docs/FEATURES.md](docs/FEATURES.md) and [docs/SPEC.md](docs/SPEC.md).
 
 ---
 
-## Important Operational Notes
+## Operational notes
 
-* **PgBouncer / Connection Poolers:** Grizzle relies on session-level advisory locks to prevent concurrent migrations. Connect directly to Postgres or use **Session Pooling**. Do not run migrations through **Transaction Pooling**.
-* **Destructive Changes:** Dropping tables/columns requires `AllowDrop: true` (or `--allow-drop` in the CLI). See [docs/SAFETY.md](docs/SAFETY.md) for full hazard handling.
+- **Connection pooling (PgBouncer):** Grizzle acquires session-level PostgreSQL advisory locks to coordinate migrations across application replicas. Connect directly to PostgreSQL or use **Session Pooling**. Do not run migrations through **Transaction Pooling**.
+- **Destructive changes:** Dropping tables or columns requires setting `AllowDrop: true` (or `--allow-drop` in the CLI). See [docs/SAFETY.md](docs/SAFETY.md) for hazard codes and approval gates.
 
 ---
 
 ## Examples
 
-* [postgres-stdlib](examples/postgres-stdlib) — `database/sql` + pgx boot sync
-* [sqlite-embedded](examples/sqlite-embedded) — pure-Go SQLite setup
-* [sqlc-workflow](examples/sqlc-workflow) — single source of truth: share `schema.sql` between sqlc and Grizzle
-* [kubernetes-blueprint](examples/kubernetes-blueprint) — multi-replica startup coordination
-* [expand-contract](examples/expand-contract) — expand / backfill / contract column rename
-* [roles-grants](examples/roles-grants) / [catalog-sync](examples/catalog-sync) — roles and publications via optional SQL files
-* [full-catalog](examples/full-catalog) — extensions, RLS, functions, triggers, and views in one `schema.sql`
+- [postgres-stdlib](examples/postgres-stdlib): boot sync with `database/sql` and `pgx`
+- [sqlite-embedded](examples/sqlite-embedded): embedded SQLite setup with pure-Go driver
+- [sqlc-workflow](examples/sqlc-workflow): sharing a single `schema.sql` between sqlc and Grizzle
+- [kubernetes-blueprint](examples/kubernetes-blueprint): multi-replica startup coordination
+- [expand-contract](examples/expand-contract): expand, backfill, and contract pattern for zero-downtime column renames
+- [roles-grants](examples/roles-grants) / [catalog-sync](examples/catalog-sync): role, grant, and publication management
+- [full-catalog](examples/full-catalog): extensions, RLS, routines, triggers, and views in one schema file
+
+---
 
 ## Documentation
 
-* [SPEC](docs/SPEC.md) — Supported SQL constructs and engine details
-* [SAFETY](docs/SAFETY.md) — Hazards, data safety rules, and drop policies
-* [LINTER](docs/LINTER_SPEC.md) — SQL review rules, naming conventions, and linting catalog
-* [ARCHITECTURE](docs/ARCHITECTURE.md) — Internal planner and execution flow
-* [CONTRIBUTING](CONTRIBUTING.md) — devenv, hooks, PR checklist
-* [CHANGELOG](CHANGELOG.md)
+- [FEATURES](docs/FEATURES.md): supported feature matrix and safety guards for PostgreSQL and SQLite
+- [SPEC](docs/SPEC.md): SQL constructs, catalog introspection, and engine specification
+- [SAFETY](docs/SAFETY.md): hazard classification, safety rules, and drop policies
+- [LINTER](docs/LINTER_SPEC.md): schema review rules and CI linting
+- [ARCHITECTURE](docs/ARCHITECTURE.md): internal planner and execution pipeline
+- [CONTRIBUTING](CONTRIBUTING.md): development setup and contribution guidelines
+- [CHANGELOG](CHANGELOG.md): release notes and version history
 
 Current tag: **v0.2.0**.
+
+---
 
 ## License
 
