@@ -94,6 +94,9 @@ Use the CLI for CI drift checks, dry runs, or exporting plans to standard migrat
 # Preview changes and generate a migration plan
 grizzle plan --dsn "$DATABASE_URL" --schema schema.sql --out plan.json
 
+# Use an external dev database URL if target DB lacks CREATE SCHEMA
+grizzle plan --dsn "$DATABASE_URL" --dev-url "$DEV_DATABASE_URL" --schema schema.sql
+
 # Apply a generated plan safely
 grizzle apply --dsn "$DATABASE_URL" --plan plan.json
 

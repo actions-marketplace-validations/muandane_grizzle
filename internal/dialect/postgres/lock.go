@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"slices"
 	"time"
 
@@ -217,4 +218,162 @@ func ReleaseSchemaLocks(ctx context.Context, dbtx dialect.DBTX, namespace string
 		}
 	}
 	return firstErr
+}
+
+// SchemaTable identifies a table within a specific PostgreSQL schema.
+type SchemaTable struct {
+	Schema string
+	Table  string
+}
+
+// QueryTableLockContention queries pg_locks and pg_stat_activity for concurrent sessions
+// holding granted locks on the target schema.table, excluding the current backend.
+//
+// NOTE: Pre-flight lock inspection is inherently racy: concurrent transactions may acquire
+// locks between the pre-flight check and subsequent DDL execution.
+func QueryTableLockContention(ctx context.Context, dbtx dialect.DBTX, schema, table string) ([]plan.LockConflict, error) {
+	if dbtx == nil {
+		return nil, fmt.Errorf("grizzle: database connection is nil")
+	}
+	const q = `
+SELECT a.pid,
+       COALESCE(a.usename, ''),
+       COALESCE(a.application_name, ''),
+       COALESCE(a.state, ''),
+       COALESCE(a.query, ''),
+       COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - a.query_start)), 0)::float8 AS duration_seconds,
+       l.mode
+FROM pg_locks l
+JOIN pg_stat_activity a ON l.pid = a.pid
+JOIN pg_class c ON l.relation = c.oid
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE n.nspname = $1 AND c.relname = $2
+  AND a.pid != pg_backend_pid()
+  AND l.granted = true
+ORDER BY a.pid ASC;`
+
+	rows, err := dbtx.QueryContext(ctx, q, schema, table)
+	if err != nil {
+		return nil, fmt.Errorf("querying lock contention on %s.%s: %w", schema, table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var conflicts []plan.LockConflict
+	for rows.Next() {
+		var c plan.LockConflict
+		c.Schema = schema
+		c.Table = table
+		var durSec float64
+		if err := rows.Scan(&c.PID, &c.Username, &c.ApplicationName, &c.State, &c.Query, &durSec, &c.LockMode); err != nil {
+			return nil, fmt.Errorf("scanning lock conflict: %w", err)
+		}
+		c.Duration = time.Duration(durSec * float64(time.Second))
+		conflicts = append(conflicts, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating lock conflicts on %s.%s: %w", schema, table, err)
+	}
+	return conflicts, nil
+}
+
+// PreflightLockContention inspects pg_locks and pg_stat_activity on target tables before DDL execution.
+// If failOnContention is false (advisory mode), warnings are logged for any conflicting holders and execution proceeds.
+// If failOnContention is true (gating mode), backoff retries occur up to timeout; if contention persists,
+// an error wrapping plan.ErrLockContention is returned.
+//
+// NOTE: Pre-flight lock inspection is inherently racy: concurrent transactions may acquire
+// locks between the pre-flight check and subsequent DDL execution. Always configure lock_timeout
+// alongside fail_on_contention to bound wait duration if a race occurs.
+func PreflightLockContention(ctx context.Context, dbtx dialect.DBTX, tables []SchemaTable, timeout time.Duration, failOnContention bool, logger *slog.Logger) error {
+	if len(tables) == 0 {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
+	checkAll := func() ([]plan.LockConflict, error) {
+		var all []plan.LockConflict
+		for _, st := range tables {
+			conflicts, err := QueryTableLockContention(ctx, dbtx, st.Schema, st.Table)
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, conflicts...)
+		}
+		return all, nil
+	}
+
+	// Advisory mode: single check, log warnings for any conflicts, do not abort
+	if !failOnContention {
+		conflicts, err := checkAll()
+		if err != nil {
+			if logger != nil {
+				logger.WarnContext(ctx, "grizzle: pre-flight lock contention check failed", "error", err)
+			}
+			return nil
+		}
+		for _, c := range conflicts {
+			if logger != nil {
+				logger.WarnContext(ctx, "grizzle: lock contention detected on target table (advisory)",
+					"schema", c.Schema,
+					"table", c.Table,
+					"pid", c.PID,
+					"user", c.Username,
+					"mode", c.LockMode,
+					"duration", c.Duration,
+					"query", c.Query,
+				)
+			}
+		}
+		return nil
+	}
+
+	// Gating mode: retry with backoff up to timeout
+	deadline := time.Now().Add(timeout)
+	attempt := 0
+	for {
+		conflicts, err := checkAll()
+		if err != nil {
+			return err
+		}
+		if len(conflicts) == 0 {
+			if attempt > 0 && logger != nil {
+				logger.InfoContext(ctx, "grizzle: lock contention cleared on target tables")
+			}
+			return nil
+		}
+
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			if logger != nil {
+				logger.ErrorContext(ctx, "grizzle: migration gated by lock contention on target table",
+					"conflicts_count", len(conflicts),
+					"first_pid", conflicts[0].PID,
+					"first_table", conflicts[0].Table,
+				)
+			}
+			return &plan.LockContentionError{Conflicts: conflicts}
+		}
+
+		b := backoff.ComputeWithMax(attempt, nil, 250*time.Millisecond)
+		remaining := time.Until(deadline)
+		if b > remaining {
+			b = remaining
+		}
+
+		if logger != nil {
+			logger.WarnContext(ctx, "grizzle: lock contention detected on target table, retrying with backoff",
+				"attempt", attempt,
+				"backoff_ms", b.Milliseconds(),
+				"conflicts_count", len(conflicts),
+			)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(b):
+		}
+		attempt++
+	}
 }

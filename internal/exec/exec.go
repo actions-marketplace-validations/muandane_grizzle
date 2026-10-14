@@ -37,6 +37,13 @@ type Span interface {
 	SetAttribute(key string, value any)
 }
 
+// Metrics defines the interface for recording Grizzle operational metrics.
+type Metrics interface {
+	RecordMigrationDuration(ctx context.Context, duration time.Duration, dialect string, status string)
+	RecordDriftDetected(ctx context.Context, dialect string, schema string)
+	RecordLockWait(ctx context.Context, duration time.Duration, dialect string)
+}
+
 // PostgresExecConfig specifies the execution options for PostgreSQL synchronization.
 type PostgresExecConfig struct {
 	TargetSchema         string
@@ -60,18 +67,34 @@ type PostgresExecConfig struct {
 	RandFloat            func() float64
 	Logger               *slog.Logger
 	Tracer               Tracer
+	Metrics              Metrics
 	DryRun               bool
 	Backfill             BackfillFunc
 	BeforeSync           SyncHook
 	AfterSync            SyncHook
 	BeforeStep           StepHook
 	AfterStep            StepHook
+	// FailOnContention gates DDL execution on PostgreSQL: if concurrent sessions hold conflicting
+	// locks on target tables, retry with backoff up to LockTimeout; if contention persists, abort
+	// with ErrLockContention instead of proceeding. When false (default), lock contention is advisory
+	// and logs a warning before proceeding.
+	FailOnContention bool
 	// DryRunLockTimeout bounds lock waits for dry-run verification
 	// (defaults to DefaultDryRunLockTimeout of 2s).
 	DryRunLockTimeout time.Duration
 	// ExecuteHooksInDryRun allows BeforeStep/AfterStep hooks to run inside the
 	// dry-run sandbox. Defaults to false to avoid external side effects.
 	ExecuteHooksInDryRun bool
+	// DevDB is an optional external database connection used exclusively for
+	// shadow-schema compilation (the always-rolled-back transaction). When
+	// non-nil, shadow transactions open against DevDB instead of the target
+	// database. Live catalog introspection always uses the target db passed to
+	// the calling function. DevDB is never written to outside of the rolled-back
+	// shadow transaction.
+	DevDB *sql.DB
+	// ShadowDBTX is an optional DBTX used by DiffPostgres to inspect the shadow
+	// schema. If nil, dbtx is used for both live and shadow inspection.
+	ShadowDBTX dialect.DBTX
 }
 
 func (cfg PostgresExecConfig) targetSchemas() []string {
@@ -144,7 +167,11 @@ func DiffPostgres(ctx context.Context, dbtx dialect.DBTX, cfg PostgresExecConfig
 			return nil, fmt.Errorf("%w: live schema: %w", plan.ErrInspectionFailed, err)
 		}
 
-		desired, err := inspectPostgresSchema(ctx, dbtx, shadowSchema, cfg.Tracer)
+		shadowDBTX := dbtx
+		if cfg.ShadowDBTX != nil {
+			shadowDBTX = cfg.ShadowDBTX
+		}
+		desired, err := inspectPostgresSchema(ctx, shadowDBTX, shadowSchema, cfg.Tracer)
 		if err != nil {
 			return nil, fmt.Errorf("%w: shadow schema: %w", plan.ErrInspectionFailed, err)
 		}
@@ -185,7 +212,11 @@ func DiffPostgres(ctx context.Context, dbtx dialect.DBTX, cfg PostgresExecConfig
 		return nil, fmt.Errorf("%w: live schemas: %w", plan.ErrInspectionFailed, err)
 	}
 
-	desiredMap, err := inspectPostgresSchemas(ctx, dbtx, shadowSchemas, cfg.Tracer)
+	shadowDBTX := dbtx
+	if cfg.ShadowDBTX != nil {
+		shadowDBTX = cfg.ShadowDBTX
+	}
+	desiredMap, err := inspectPostgresSchemas(ctx, shadowDBTX, shadowSchemas, cfg.Tracer)
 	if err != nil {
 		return nil, fmt.Errorf("%w: shadow schemas: %w", plan.ErrInspectionFailed, err)
 	}
@@ -397,7 +428,21 @@ func (t *lockBudgetTracker) reserve(d time.Duration) bool {
 }
 
 // SyncPostgres synchronizes PostgreSQL with session-level advisory locking, timeouts, and retry logic.
-func SyncPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) error {
+func SyncPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) (err error) {
+	start := time.Now()
+	var totalCommitted int
+	defer func() {
+		if cfg.Metrics != nil {
+			status := "applied"
+			if err != nil {
+				status = "failed"
+			} else if totalCommitted == 0 {
+				status = "noop"
+			}
+			cfg.Metrics.RecordMigrationDuration(ctx, time.Since(start), "postgres", status)
+		}
+	}()
+
 	maxRetries := max(cfg.MaxRetries, 0)
 
 	// LockTimeout bounds the TOTAL advisory-lock acquisition wait across
@@ -412,8 +457,9 @@ func SyncPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) error
 
 	attempt := 0
 	for {
-		committed, err := syncPostgresOnce(ctx, db, cfg, budget)
-		if err == nil {
+		committed, syncErr := syncPostgresOnce(ctx, db, cfg, budget)
+		if syncErr == nil {
+			totalCommitted = committed
 			if cfg.Backfill != nil && cfg.Filters.ExpandContract {
 				if err := RunBackfill(ctx, db, cfg.TargetSchema, cfg.Filters.Renames, nil, cfg.Backfill, cfg.Logger); err != nil {
 					return err
@@ -421,6 +467,7 @@ func SyncPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) error
 			}
 			return nil
 		}
+		err = syncErr
 
 		// Only retry before any step has committed. After partial progress: abort, require re-plan.
 		if committed > 0 || !IsRetryable(err) || attempt >= maxRetries {
@@ -514,7 +561,11 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 		acquiredSchemas, err = postgres.AcquireSchemaLocks(lockCtx, conn, lockNs, targetSchemas)
 	}
 	cancelLock()
-	budget.recordWait(time.Since(lockStart))
+	lockWaitDuration := time.Since(lockStart)
+	budget.recordWait(lockWaitDuration)
+	if cfg.Metrics != nil {
+		cfg.Metrics.RecordLockWait(ctx, lockWaitDuration, "postgres")
+	}
 	if lockSpan != nil {
 		if err != nil {
 			lockSpan.RecordError(err)
@@ -571,9 +622,19 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 
 	// 2. Setup shadow schema and diff schemas inside an isolated transaction
 	shadowStart := time.Now()
-	shadowTx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-	if err != nil {
-		return 0, fmt.Errorf("grizzle: failed to begin shadow tx: %w", err)
+	var shadowTx *sql.Tx
+	if cfg.DevDB != nil {
+		var err error
+		shadowTx, err = cfg.DevDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		if err != nil {
+			return 0, fmt.Errorf("grizzle: failed to begin shadow tx on dev database: %w", err)
+		}
+	} else {
+		var err error
+		shadowTx, err = conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		if err != nil {
+			return 0, fmt.Errorf("grizzle: failed to begin shadow tx: %w", err)
+		}
 	}
 	defer func() { _ = shadowTx.Rollback() }()
 
@@ -593,7 +654,7 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 		shadowSchemas = []string{shadowSchema}
 
 		if err := postgres.SetupShadowSchema(ctx, shadowTx, shadowSchema); err != nil {
-			return 0, err
+			return 0, wrapShadowSetupError(err, cfg.DevDB != nil)
 		}
 
 		if err := postgres.RunShadowDDL(ctx, shadowTx, shadowSchema, primarySchema, schemaGroups.ShadowSQL); err != nil {
@@ -609,7 +670,7 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 		}
 
 		if err := postgres.SetupShadowSchemas(ctx, shadowTx, shadowSchemas); err != nil {
-			return 0, err
+			return 0, wrapShadowSetupError(err, cfg.DevDB != nil)
 		}
 
 		if err := postgres.RunMultiShadowDDL(ctx, shadowTx, shadowMap, targetSchemas, schemaGroups.ShadowSQL); err != nil {
@@ -624,7 +685,9 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 	}
 
 	// 3. Diff schemas post-lock
-	steps, err := DiffPostgres(ctx, shadowTx, cfg)
+	diffCfg := cfg
+	diffCfg.ShadowDBTX = shadowTx
+	steps, err := DiffPostgres(ctx, conn, diffCfg)
 	if err != nil {
 		return 0, err
 	}
@@ -646,6 +709,9 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 
 	// 4b. Verify expected plan hash if provided (aborts with ErrPlanDrift on mismatch)
 	if cfg.ExpectedHash != "" && p.Hash() != cfg.ExpectedHash {
+		if cfg.Metrics != nil {
+			cfg.Metrics.RecordDriftDetected(ctx, "postgres", primarySchema)
+		}
 		if logger != nil {
 			logger.WarnContext(ctx, "grizzle: plan drift detected post-lock", "expected", cfg.ExpectedHash, "actual", p.Hash())
 		}
@@ -656,7 +722,11 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 		if logger != nil {
 			logger.InfoContext(ctx, "grizzle: schema is already in sync", "duration", time.Since(start))
 		}
-		_ = postgres.DropShadowSchemas(ctx, conn, shadowSchemas)
+		if cfg.DevDB != nil {
+			_ = postgres.DropShadowSchemas(ctx, cfg.DevDB, shadowSchemas)
+		} else {
+			_ = postgres.DropShadowSchemas(ctx, conn, shadowSchemas)
+		}
 		return 0, nil
 	}
 
@@ -694,6 +764,12 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 
 	// 6. Cleanup shadow schema before live execution
 	if err := postgres.DropShadowSchemas(ctx, conn, shadowSchemas); err != nil {
+		return 0, err
+	}
+
+	// 6b. Lock contention pre-flight: check for conflicting holders on target tables before DDL execution
+	lockTables := CollectTablesNeedingStrongLocks(primarySchema, steps)
+	if err := postgres.PreflightLockContention(ctx, conn, lockTables, cfg.LockTimeout, cfg.FailOnContention, logger); err != nil {
 		return 0, err
 	}
 
@@ -890,7 +966,19 @@ func PlanDiffPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) (
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	_ = ApplyTxTimeouts(ctx, tx, cfg.LockTimeout, cfg.StatementTimeout)
+	var shadowTx *sql.Tx
+	if cfg.DevDB != nil {
+		var err error
+		shadowTx, err = cfg.DevDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		if err != nil {
+			return nil, fmt.Errorf("grizzle: failed to begin shadow tx on dev database: %w", err)
+		}
+		defer func() { _ = shadowTx.Rollback() }()
+	} else {
+		shadowTx = tx
+	}
+
+	_ = ApplyTxTimeouts(ctx, shadowTx, cfg.LockTimeout, cfg.StatementTimeout)
 
 	schemaGroups, err := splitSchemaSQL(cfg.SchemaSQL)
 	if err != nil {
@@ -905,12 +993,12 @@ func PlanDiffPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) (
 		}
 		shadowSchemas = []string{shadowSchema}
 
-		if err := postgres.SetupShadowSchema(ctx, tx, shadowSchema); err != nil {
-			return nil, err
+		if err := postgres.SetupShadowSchema(ctx, shadowTx, shadowSchema); err != nil {
+			return nil, wrapShadowSetupError(err, cfg.DevDB != nil)
 		}
-		defer func() { _ = postgres.DropShadowSchema(context.Background(), tx, shadowSchema) }()
+		defer func() { _ = postgres.DropShadowSchema(context.Background(), shadowTx, shadowSchema) }()
 
-		if err := postgres.RunShadowDDL(ctx, tx, shadowSchema, primarySchema, schemaGroups.ShadowSQL); err != nil {
+		if err := postgres.RunShadowDDL(ctx, shadowTx, shadowSchema, primarySchema, schemaGroups.ShadowSQL); err != nil {
 			return nil, fmt.Errorf("%w: %w", plan.ErrCompilationFailed, err)
 		}
 	} else {
@@ -919,17 +1007,19 @@ func PlanDiffPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) (
 			shadowSchemas = append(shadowSchemas, shadow)
 		}
 
-		if err := postgres.SetupShadowSchemas(ctx, tx, shadowSchemas); err != nil {
-			return nil, err
+		if err := postgres.SetupShadowSchemas(ctx, shadowTx, shadowSchemas); err != nil {
+			return nil, wrapShadowSetupError(err, cfg.DevDB != nil)
 		}
-		defer func() { _ = postgres.DropShadowSchemas(context.Background(), tx, shadowSchemas) }()
+		defer func() { _ = postgres.DropShadowSchemas(context.Background(), shadowTx, shadowSchemas) }()
 
-		if err := postgres.RunMultiShadowDDL(ctx, tx, shadowMap, targetSchemas, schemaGroups.ShadowSQL); err != nil {
+		if err := postgres.RunMultiShadowDDL(ctx, shadowTx, shadowMap, targetSchemas, schemaGroups.ShadowSQL); err != nil {
 			return nil, fmt.Errorf("%w: %w", plan.ErrCompilationFailed, err)
 		}
 	}
 
-	steps, err := DiffPostgres(ctx, tx, cfg)
+	diffCfg := cfg
+	diffCfg.ShadowDBTX = shadowTx
+	steps, err := DiffPostgres(ctx, tx, diffCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -988,6 +1078,7 @@ type SQLiteExecConfig struct {
 	ExpectedHash         string
 	Logger               *slog.Logger
 	Tracer               Tracer
+	Metrics              Metrics
 	DryRun               bool
 	Backfill             BackfillFunc
 	BeforeSync           SyncHook
@@ -1020,15 +1111,27 @@ func (cfg SQLiteExecConfig) needsAttach() bool {
 }
 
 // SyncSQLite synchronizes SQLite in a single transaction with foreign keys handling.
-func SyncSQLite(ctx context.Context, db *sql.DB, cfg SQLiteExecConfig) error {
+func SyncSQLite(ctx context.Context, db *sql.DB, cfg SQLiteExecConfig) (err error) {
 	start := time.Now()
+	var p *plan.Plan
+	defer func() {
+		if cfg.Metrics != nil {
+			status := "applied"
+			if err != nil {
+				status = "failed"
+			} else if p == nil || len(p.Steps) == 0 {
+				status = "noop"
+			}
+			cfg.Metrics.RecordMigrationDuration(ctx, time.Since(start), "sqlite", status)
+		}
+	}()
+
 	logger := cfg.Logger
 	schemas := cfg.targetSchemas()
 	if logger != nil {
 		logger.InfoContext(ctx, "sqlite: starting SQLite schema synchronization", "target_schemas", schemas)
 	}
 
-	var p *plan.Plan
 	var histErr error
 
 	run := func(conn *sql.Conn) error {
@@ -1063,6 +1166,9 @@ func SyncSQLite(ctx context.Context, db *sql.DB, cfg SQLiteExecConfig) error {
 		}
 
 		if cfg.ExpectedHash != "" && p.Hash() != cfg.ExpectedHash {
+			if cfg.Metrics != nil {
+				cfg.Metrics.RecordDriftDetected(ctx, "sqlite", cfg.primarySchema())
+			}
 			if logger != nil {
 				logger.WarnContext(ctx, "sqlite: plan drift detected post-lock", "expected", cfg.ExpectedHash, "actual", p.Hash())
 			}
@@ -1167,7 +1273,6 @@ func SyncSQLite(ctx context.Context, db *sql.DB, cfg SQLiteExecConfig) error {
 		return err
 	}
 
-	var err error
 	if cfg.needsAttach() {
 		err = withSQLiteAttachedConn(ctx, db, cfg.SQLiteAttach, run)
 	} else {
@@ -1225,7 +1330,21 @@ func PlanDiffSQLite(ctx context.Context, db *sql.DB, cfg SQLiteExecConfig) (*pla
 
 // ApplyPostgres applies a precomputed plan to PostgreSQL using a dedicated connection,
 // session-level advisory locking, step grouping (NonTx vs Tx), timeouts, and retry logic.
-func ApplyPostgres(ctx context.Context, db *sql.DB, p *plan.Plan, cfg PostgresExecConfig) error {
+func ApplyPostgres(ctx context.Context, db *sql.DB, p *plan.Plan, cfg PostgresExecConfig) (err error) {
+	start := time.Now()
+	var totalCommitted int
+	defer func() {
+		if cfg.Metrics != nil && p != nil {
+			status := "applied"
+			if err != nil {
+				status = "failed"
+			} else if totalCommitted == 0 || len(p.Steps) == 0 {
+				status = "noop"
+			}
+			cfg.Metrics.RecordMigrationDuration(ctx, time.Since(start), "postgres", status)
+		}
+	}()
+
 	if p == nil {
 		return fmt.Errorf("grizzle: plan cannot be nil")
 	}
@@ -1269,8 +1388,9 @@ func ApplyPostgres(ctx context.Context, db *sql.DB, p *plan.Plan, cfg PostgresEx
 	attempt := 0
 
 	for {
-		committed, err := applyPostgresOnce(ctx, db, p, cfg, budget)
-		if err == nil {
+		committed, applyErr := applyPostgresOnce(ctx, db, p, cfg, budget)
+		if applyErr == nil {
+			totalCommitted = committed
 			if cfg.Backfill != nil && p.ExpandContract {
 				if err := RunBackfill(ctx, db, cfg.TargetSchema, p.Renames, nil, cfg.Backfill, cfg.Logger); err != nil {
 					return err
@@ -1278,6 +1398,7 @@ func ApplyPostgres(ctx context.Context, db *sql.DB, p *plan.Plan, cfg PostgresEx
 			}
 			return nil
 		}
+		err = applyErr
 
 		// Only retry before any step has committed. After partial progress: abort, require re-plan.
 		if committed > 0 || !IsRetryable(err) || attempt >= maxRetries {
@@ -1364,7 +1485,11 @@ func applyPostgresOnce(ctx context.Context, db *sql.DB, p *plan.Plan, cfg Postgr
 		acquiredSchemas, err = postgres.AcquireSchemaLocks(lockCtx, conn, lockNs, targetSchemas)
 	}
 	cancelLock()
-	budget.recordWait(time.Since(lockStart))
+	lockWaitDuration := time.Since(lockStart)
+	budget.recordWait(lockWaitDuration)
+	if cfg.Metrics != nil {
+		cfg.Metrics.RecordLockWait(ctx, lockWaitDuration, "postgres")
+	}
 	if lockSpan != nil {
 		if err != nil {
 			lockSpan.RecordError(err)
@@ -1462,6 +1587,12 @@ func applyPostgresOnce(ctx context.Context, db *sql.DB, p *plan.Plan, cfg Postgr
 				_ = history.RecordProgress(fbCtx, histConn, "postgres", primarySchema, p, status, failedStep, execErr, time.Since(start))
 			}
 		}
+	}
+
+	// Lock contention pre-flight: check for conflicting holders on target tables before DDL execution
+	lockTables := CollectTablesNeedingStrongLocks(primarySchema, p.Steps)
+	if err := postgres.PreflightLockContention(ctx, conn, lockTables, cfg.LockTimeout, cfg.FailOnContention, logger); err != nil {
+		return 0, err
 	}
 
 	for groupIdx, group := range groups {
@@ -1601,7 +1732,20 @@ func applyPostgresOnce(ctx context.Context, db *sql.DB, p *plan.Plan, cfg Postgr
 }
 
 // ApplySQLite applies a precomputed plan to SQLite in a single transaction with foreign keys handling.
-func ApplySQLite(ctx context.Context, db *sql.DB, p *plan.Plan, cfg SQLiteExecConfig) error {
+func ApplySQLite(ctx context.Context, db *sql.DB, p *plan.Plan, cfg SQLiteExecConfig) (err error) {
+	start := time.Now()
+	defer func() {
+		if cfg.Metrics != nil && p != nil {
+			status := "applied"
+			if err != nil {
+				status = "failed"
+			} else if len(p.Steps) == 0 {
+				status = "noop"
+			}
+			cfg.Metrics.RecordMigrationDuration(ctx, time.Since(start), "sqlite", status)
+		}
+	}()
+
 	if p == nil {
 		return fmt.Errorf("sqlite: plan cannot be nil")
 	}
@@ -1628,7 +1772,6 @@ func ApplySQLite(ctx context.Context, db *sql.DB, p *plan.Plan, cfg SQLiteExecCo
 		return nil
 	}
 
-	start := time.Now()
 	logger := cfg.Logger
 	if logger != nil {
 		logger.InfoContext(ctx, "sqlite: starting SQLite plan application")
@@ -1640,7 +1783,7 @@ func ApplySQLite(ctx context.Context, db *sql.DB, p *plan.Plan, cfg SQLiteExecCo
 	}
 
 	var histErr error
-	err := withSQLiteAttachedConn(ctx, db, cfg.SQLiteAttach, func(conn *sql.Conn) error {
+	err = withSQLiteAttachedConn(ctx, db, cfg.SQLiteAttach, func(conn *sql.Conn) error {
 		// BeforeSync runs once before any migration steps are executed.
 		if err := callBeforeSync(cfg.BeforeSync, ctx, conn); err != nil {
 			hookErr := fmt.Errorf("sqlite: before_sync hook: %w", err)

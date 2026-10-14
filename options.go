@@ -45,6 +45,11 @@ type Options struct {
 	// For SQLite, entries other than "main" are ATTACH DATABASE schema names listed in SQLiteAttach.
 	TargetSchemas []string
 
+	// TargetSchemaPattern specifies a LIKE-style pattern to discover target PostgreSQL schemas
+	// dynamically from pg_namespace (e.g. "tenant_%"). Discovered schemas are sorted deterministically,
+	// exclude system schemas, and are populated into TargetSchemas.
+	TargetSchemaPattern string
+
 	// SQLiteAttach maps ATTACH DATABASE schema names to filesystem paths.
 	// Every TargetSchemas entry other than "main" must appear here; "main" is
 	// the primary database already open and must not be listed. Unknown keys,
@@ -246,11 +251,37 @@ type Options struct {
 	// with ErrPlanDrift if they differ.
 	ExpectedHash string
 
+	// DevDatabaseURL is an optional PostgreSQL connection string used
+	// exclusively for shadow-schema compilation (the always-rolled-back
+	// transaction that validates SchemaSQL). When non-empty the shadow
+	// transaction runs against this external database and never touches the
+	// target database. Live catalog introspection always uses the target DB.
+	//
+	// Use DevDatabaseURL when the target database user lacks CREATE SCHEMA
+	// privilege. Without it, a privilege failure during shadow setup is
+	// returned as an error that names this field and --dev-url as the fix.
+	//
+	// PostgreSQL only; ignored on SQLite.
+	DevDatabaseURL string
+
+	// FailOnContention gates DDL execution on PostgreSQL: if concurrent sessions hold conflicting
+	// locks on target tables, retry with backoff up to LockTimeout; if contention persists, abort
+	// with ErrLockContention instead of proceeding. When false (default), lock contention is advisory
+	// and logs a warning before proceeding.
+	//
+	// NOTE: Pre-flight lock inspection is inherently racy: concurrent transactions may acquire
+	// locks between the pre-flight check and subsequent DDL execution. Always configure LockTimeout
+	// alongside FailOnContention to bound wait duration if a race occurs.
+	FailOnContention bool
+
 	// Logger accepts a structured logger (*slog.Logger) for migration events.
 	Logger *slog.Logger
 
 	// Tracer specifies an optional tracer (OpenTelemetry or custom) for observing migrations.
 	Tracer Tracer
+
+	// Metrics specifies an optional metrics recorder (OpenTelemetry or custom) for observing migrations.
+	Metrics Metrics
 }
 
 // Tracer defines the interface for tracing Grizzle lifecycle events.
@@ -258,6 +289,9 @@ type Tracer = exec.Tracer
 
 // Span represents an active trace span recorded by a Tracer.
 type Span = exec.Span
+
+// Metrics defines the interface for recording Grizzle operational metrics.
+type Metrics = exec.Metrics
 
 // BackfillFunc defines the hook function signature for batch backfilling columns outside the DDL lock window.
 type BackfillFunc func(ctx context.Context, tx *sql.Tx, table, oldCol, newCol string) error
@@ -294,6 +328,13 @@ func WithTracer(t Tracer) Option {
 	}
 }
 
+// WithMetrics sets the metrics recorder.
+func WithMetrics(m Metrics) Option {
+	return func(o *Options) {
+		o.Metrics = m
+	}
+}
+
 // WithDialect sets the database dialect.
 func WithDialect(d Dialect) Option {
 	return func(o *Options) {
@@ -317,6 +358,14 @@ func WithTargetSchemas(schemas ...string) Option {
 		if len(schemas) > 0 {
 			o.TargetSchema = schemas[0]
 		}
+	}
+}
+
+// WithTargetSchemaPattern sets a LIKE-style pattern to discover target PostgreSQL schemas
+// dynamically from pg_namespace (e.g. "tenant_%").
+func WithTargetSchemaPattern(pattern string) Option {
+	return func(o *Options) {
+		o.TargetSchemaPattern = pattern
 	}
 }
 
@@ -426,6 +475,30 @@ func WithExpectedHash(hash string) Option {
 	}
 }
 
+// WithDevDatabaseURL sets the external database URL used for shadow-schema
+// compilation. When non-empty, the always-rolled-back shadow transaction runs
+// against this database instead of the target database.
+//
+// Use when the target database user lacks CREATE SCHEMA privilege. Without
+// this option a privilege failure during shadow setup returns a clear error
+// naming --dev-url / Options.DevDatabaseURL as the fix.
+//
+// PostgreSQL only; ignored on SQLite.
+func WithDevDatabaseURL(url string) Option {
+	return func(o *Options) {
+		o.DevDatabaseURL = url
+	}
+}
+
+// WithFailOnContention configures whether lock contention pre-flight gates migration execution.
+// When true, conflicting locks on target tables trigger backoff retries up to LockTimeout,
+// and abort with ErrLockContention if contention does not clear.
+func WithFailOnContention(fail bool) Option {
+	return func(o *Options) {
+		o.FailOnContention = fail
+	}
+}
+
 // Validate is the canonical pure validation entry point for Options.
 // It checks SchemaSQL, strict scope, dialect value, target/shadow identifiers,
 // timeout and retry bounds, SQLite rebuild parameters, and multi-schema SQLite
@@ -460,8 +533,18 @@ func (o *Options) Validate() error {
 		return fmt.Errorf("%w: SQLiteRebuildBatchSize must be non-negative", ErrInvalidOptions)
 	}
 
+	if o.TargetSchemaPattern != "" && (len(o.TargetSchemas) > 0 || o.TargetSchema != "") {
+		return fmt.Errorf("%w: cannot specify both TargetSchemaPattern and TargetSchema/TargetSchemas", ErrInvalidOptions)
+	}
+
 	switch o.Dialect {
 	case DialectSQLite:
+		if o.FailOnContention {
+			return fmt.Errorf("%w: FailOnContention requires PostgreSQL; lock contention pre-flight is not supported on SQLite", ErrInvalidOptions)
+		}
+		if o.TargetSchemaPattern != "" {
+			return fmt.Errorf("%w: TargetSchemaPattern requires PostgreSQL; multi-tenant schema patterns are not supported on SQLite", ErrInvalidOptions)
+		}
 		if err := validateSQLiteAttach(o); err != nil {
 			return err
 		}

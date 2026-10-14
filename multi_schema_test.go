@@ -3,7 +3,9 @@ package grizzle_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -585,5 +587,209 @@ func TestMultiSchema_SQLiteAttachRoundTrip(t *testing.T) {
 	}
 	if err := grizzle.Sync(ctx, db, opts); err != nil {
 		t.Fatalf("second Sync failed: %v", err)
+	}
+}
+
+func TestTargetSchemaPattern_PostgresDiscoveryAndDeterministicOrder(t *testing.T) {
+	db, _ := getPostgresDB(t)
+	defer func() { _ = db.Close() }()
+
+	ts := time.Now().UnixNano()
+	sGamma := fmt.Sprintf("tenant_%d_gamma", ts)
+	sAlpha := fmt.Sprintf("tenant_%d_alpha", ts)
+	sBeta := fmt.Sprintf("tenant_%d_beta", ts)
+
+	// Create schemas deliberately in non-alphabetical order
+	for _, s := range []string{sGamma, sAlpha, sBeta} {
+		if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA %q;", s)); err != nil {
+			t.Fatalf("creating schema %s: %v", s, err)
+		}
+	}
+	defer func() {
+		for _, s := range []string{sGamma, sAlpha, sBeta} {
+			_, _ = db.Exec(fmt.Sprintf("DROP SCHEMA IF EXISTS %q CASCADE;", s))
+		}
+	}()
+
+	pattern := fmt.Sprintf("tenant_%d_%%", ts)
+	ctx := context.Background()
+
+	// 1. Direct discovery test
+	discovered, err := postgres.DiscoverSchemas(ctx, db, pattern)
+	if err != nil {
+		t.Fatalf("DiscoverSchemas failed: %v", err)
+	}
+	expected := []string{sAlpha, sBeta, sGamma}
+	if !slices.Equal(discovered, expected) {
+		t.Fatalf("expected deterministic sorted schemas %v, got %v", expected, discovered)
+	}
+
+	// 2. PlanDiff using TargetSchemaPattern
+	schemaSQL := fmt.Sprintf(`
+		CREATE TABLE %q.users (id INT PRIMARY KEY, name TEXT);
+		CREATE TABLE %q.users (id INT PRIMARY KEY, name TEXT);
+		CREATE TABLE %q.users (id INT PRIMARY KEY, name TEXT);
+	`, sAlpha, sBeta, sGamma)
+
+	p, err := grizzle.PlanDiff(ctx, db, grizzle.Options{
+		Dialect:             grizzle.DialectPostgres,
+		TargetSchemaPattern: pattern,
+		SchemaSQL:           schemaSQL,
+	})
+	if err != nil {
+		t.Fatalf("PlanDiff failed: %v", err)
+	}
+
+	if !slices.Equal(p.TargetSchemas, expected) {
+		t.Fatalf("expected p.TargetSchemas %v, got %v", expected, p.TargetSchemas)
+	}
+	if p.TargetSchema != sAlpha {
+		t.Fatalf("expected p.TargetSchema %q, got %q", sAlpha, p.TargetSchema)
+	}
+
+	// Plan.Hash() must be non-empty and stable
+	h1 := p.Hash()
+	if h1 == "" {
+		t.Fatalf("expected non-empty plan hash")
+	}
+
+	// 3. Sync across discovered schemas
+	err = grizzle.Sync(ctx, db, grizzle.Options{
+		Dialect:             grizzle.DialectPostgres,
+		TargetSchemaPattern: pattern,
+		SchemaSQL:           schemaSQL,
+	})
+	if err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+
+	// 4. Round-trip idempotency
+	p2, err := grizzle.PlanDiff(ctx, db, grizzle.Options{
+		Dialect:             grizzle.DialectPostgres,
+		TargetSchemaPattern: pattern,
+		SchemaSQL:           schemaSQL,
+	})
+	if err != nil {
+		t.Fatalf("PlanDiff round-trip failed: %v", err)
+	}
+	if len(p2.Steps) != 0 {
+		t.Fatalf("expected 0 diff steps on round-trip, got %d", len(p2.Steps))
+	}
+}
+
+func TestTargetSchemaPattern_ZeroMatching(t *testing.T) {
+	db, _ := getPostgresDB(t)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	_, err := grizzle.PlanDiff(ctx, db, grizzle.Options{
+		Dialect:             grizzle.DialectPostgres,
+		TargetSchemaPattern: "nonexistent_tenant_xyz_pattern_%",
+		SchemaSQL:           "CREATE TABLE dummy (id INT);",
+	})
+	if err == nil {
+		t.Fatalf("expected error for zero matching schemas, got nil")
+	}
+	if !errors.Is(err, grizzle.ErrNoMatchingSchemas) {
+		t.Fatalf("expected ErrNoMatchingSchemas, got: %v", err)
+	}
+}
+
+func TestTargetSchemaPattern_SystemSchemasExcluded(t *testing.T) {
+	db, _ := getPostgresDB(t)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	// Create an internal/shadow-like schema
+	shadowSchema := fmt.Sprintf("_grizzle_test_%d", time.Now().UnixNano())
+	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA %q;", shadowSchema)); err != nil {
+		t.Fatalf("creating test shadow schema: %v", err)
+	}
+	defer func() {
+		_, _ = db.Exec(fmt.Sprintf("DROP SCHEMA IF EXISTS %q CASCADE;", shadowSchema))
+	}()
+
+	schemas, err := postgres.DiscoverSchemas(ctx, db, "%")
+	if err != nil {
+		t.Fatalf("DiscoverSchemas failed: %v", err)
+	}
+
+	for _, s := range schemas {
+		if strings.HasPrefix(s, "pg_") {
+			t.Errorf("discovered system schema: %s", s)
+		}
+		if s == "information_schema" {
+			t.Errorf("discovered information_schema")
+		}
+		if strings.HasPrefix(s, "_grizzle") {
+			t.Errorf("discovered internal/shadow schema: %s", s)
+		}
+	}
+}
+
+func TestTargetSchemaPattern_PlanHashDriftOnNewSchema(t *testing.T) {
+	db, _ := getPostgresDB(t)
+	defer func() { _ = db.Close() }()
+
+	ts := time.Now().UnixNano()
+	s1 := fmt.Sprintf("drift_tenant_%d_1", ts)
+	s2 := fmt.Sprintf("drift_tenant_%d_2", ts)
+	s3 := fmt.Sprintf("drift_tenant_%d_3", ts)
+
+	for _, s := range []string{s1, s2} {
+		if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA %q;", s)); err != nil {
+			t.Fatalf("creating schema %s: %v", s, err)
+		}
+	}
+	defer func() {
+		for _, s := range []string{s1, s2, s3} {
+			_, _ = db.Exec(fmt.Sprintf("DROP SCHEMA IF EXISTS %q CASCADE;", s))
+		}
+	}()
+
+	pattern := fmt.Sprintf("drift_tenant_%d_%%", ts)
+	ctx := context.Background()
+
+	schemaSQL := fmt.Sprintf(`
+		CREATE TABLE %q.items (id INT PRIMARY KEY);
+		CREATE TABLE %q.items (id INT PRIMARY KEY);
+	`, s1, s2)
+
+	p1, err := grizzle.PlanDiff(ctx, db, grizzle.Options{
+		Dialect:             grizzle.DialectPostgres,
+		TargetSchemaPattern: pattern,
+		SchemaSQL:           schemaSQL,
+	})
+	if err != nil {
+		t.Fatalf("PlanDiff 1 failed: %v", err)
+	}
+	hash1 := p1.Hash()
+
+	// Now introduce a 3rd schema matching the pattern
+	if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA %q;", s3)); err != nil {
+		t.Fatalf("creating schema %s: %v", s3, err)
+	}
+
+	// Schema discovery now resolves 3 schemas -> plan hash must change!
+	p2, err := grizzle.PlanDiff(ctx, db, grizzle.Options{
+		Dialect:             grizzle.DialectPostgres,
+		TargetSchemaPattern: pattern,
+		SchemaSQL:           schemaSQL,
+	})
+	if err != nil {
+		t.Fatalf("PlanDiff 2 failed: %v", err)
+	}
+	hash2 := p2.Hash()
+
+	if hash1 == hash2 {
+		t.Fatalf("expected plan hash to change when new schema matches pattern, but both got %s", hash1)
+	}
+
+	// Applying with outdated expected hash must trigger ErrPlanDrift
+	applyErr := grizzle.Apply(ctx, db, p1, grizzle.ApplyOpts{
+		ExpectedHash: hash2, // hash2 doesn't match p1's hash1
+	})
+	if !errors.Is(applyErr, grizzle.ErrPlanDrift) {
+		t.Fatalf("expected ErrPlanDrift on hash mismatch, got: %v", applyErr)
 	}
 }

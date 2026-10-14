@@ -5,6 +5,38 @@ All notable changes to Grizzle will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.0] - Unreleased
+
+### Added
+- **External Dev Database URL for Shadow Compilation** (`--dev-url` / `Options.DevDatabaseURL`):
+  - Support compiling shadow schemas against an external development database instead of the live target database.
+  - Actionable error guidance: when the target database user lacks `CREATE SCHEMA` privileges and no dev URL is provided, returns an explicit error naming `--dev-url` / `Options.DevDatabaseURL` and `GRANT CREATE ON DATABASE` with zero silent fallback.
+  - CLI integration across `plan`, `apply`, `check`, `lint`, `export`, `status`, and `baseline` via `--dev-url` flag, `GRIZZLE_DEV_URL` / `DEV_DATABASE_URL` environment variables, and `dev_url` config property in `grizzle.yaml`.
+- **Composite Primary Key Keyset Backfill** (`internal/exec/backfill.go`):
+  - Keyset pagination with SQL row-value comparison `(pk1, ..., pkN) > ($1, ..., $N)` and tuple `IN` updates supporting $N$-column composite primary keys ($N \ge 1$) across PostgreSQL and SQLite.
+  - Index verification: requires and verifies that a database index exists whose leading columns match the primary key column order before keyset traversal begins.
+  - Mid-run resumption: seamlessly resumes backfill progression from partially-backfilled batches without skipping or duplicating rows.
+- **Multi-Tenant Schema Patterns** (`Options.TargetSchemaPattern` / `--target-schema-pattern` / `--schema-pattern`):
+  - Dynamic discovery of PostgreSQL schemas via `pg_namespace` matching LIKE patterns (e.g. `tenant_%`), sorted in deterministic ascending order.
+  - Automatic exclusion of PostgreSQL system schemas (`pg_%`, `information_schema`) and Grizzle shadow/internal schemas (`_grizzle%`).
+  - Plan drift detection: discovered schema list populates `Plan.TargetSchemas` and participates in `Plan.Hash()`, detecting schema additions and removals.
+- **Lock Contention Pre-Flight** (`Options.FailOnContention` / `--fail-on-contention` / `LockContentionError`):
+  - Pre-flight lock contention inspection before executing DDL steps requiring strong table locks (`AccessExclusiveLock`, `ShareUpdateExclusiveLock`, etc.), querying `pg_locks` joined with `pg_stat_activity` on target tables while filtering out the current backend PID.
+  - Advisory mode by default: logs detailed warnings identifying conflicting PIDs, usernames, applications, lock modes, running queries, and durations without gating execution.
+  - Fail-on-contention gating via `--fail-on-contention` / `Options.FailOnContention`: retries with exponential backoff up to `LockTimeout`, aborting execution with structured `LockContentionError` (wrapping `ErrLockContention`) if contention does not clear within the timeout.
+- **Metrics & Readiness Probe** (`otelgrizzle`, `grizzle.Metrics`, `grizzle.IsReady`):
+  - Standardized OpenTelemetry metrics in separate subpackage `otelgrizzle` (`otelgrizzle.NewMetrics`, `otelgrizzle.WithMetrics`), keeping core Grizzle 100% dependency-free:
+    - `migration_duration_seconds` (Float64Histogram): end-to-end migration execution duration labeled by `dialect` and `status` (`applied`, `failed`, `noop`).
+    - `drift_detected` (Int64Counter): total count of detected schema drift and approved plan hash mismatch events.
+    - `lock_wait_seconds` (Float64Histogram): time spent acquiring or waiting for database locks in seconds.
+  - Zero-side-effect, lock-free readiness probe `grizzle.IsReady(ctx, db, ...)`:
+    - Inspects latest migration state in `grizzle_history` without acquiring advisory locks, creating tables, or mutating state.
+    - Returns `(true, nil)` when latest migration record is `"applied"` or `"baseline"`.
+    - Returns `(false, nil)` when unmigrated (no `grizzle_history` table or 0 rows) or when latest status is non-ready (`"failed"`, `"partial"`, etc.).
+    - Returns `(false, err)` on database connectivity/query failure.
+    - Multi-schema support: verifies readiness across all configured target schemas.
+  - Zero `Plan.Hash()` impact; 100% backward compatible with existing stored plans.
+
 ## [v0.1.0] - 2026-10-13
 
 ### Added

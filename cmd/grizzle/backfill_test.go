@@ -153,8 +153,56 @@ func TestCopyBackfillHook_RefusesNoPK(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected PK refusal error")
 	}
-	if !strings.Contains(err.Error(), "single-column primary key") {
+	if !strings.Contains(err.Error(), "requires a primary key") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCopyBackfillHook_CompositePK(t *testing.T) {
+	t.Parallel()
+
+	db, err := sql.Open("sqlite", "file:cli_comp_test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := t.Context()
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE tenant_items (
+			tenant_id INT NOT NULL,
+			item_id INT NOT NULL,
+			old_c TEXT NOT NULL,
+			new_c TEXT,
+			PRIMARY KEY (tenant_id, item_id)
+		);
+		INSERT INTO tenant_items VALUES
+			(1, 10, 'val1', NULL),
+			(1, 20, 'val2', NULL),
+			(2, 10, 'val3', NULL);
+	`)
+	if err != nil {
+		t.Fatalf("create/insert: %v", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	hook := newCopyBackfillHook(grizzle.DialectSQLite, 10)
+	if err := hook(ctx, tx, "tenant_items", "old_c", "new_c"); err != nil {
+		t.Fatalf("composite PK backfill hook failed: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var nulls int
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenant_items WHERE new_c IS NULL`).Scan(&nulls)
+	if nulls != 0 {
+		t.Fatalf("expected 0 NULL rows, got %d", nulls)
 	}
 }
 

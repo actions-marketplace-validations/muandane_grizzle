@@ -14,12 +14,13 @@ func TestConfig_YAML(t *testing.T) {
 dsn: "postgres://user:pass@localhost:5432/app"
 schema: "db/schema.sql"
 dialect: "postgres"
-target_schema: "public"
+target_schema_pattern: "tenant_%"
 allow_drop: true
 roles: "db/roles.sql"
 seed: "db/seed.sql"
 before_sync: "db/before.sql"
 after_sync: "db/after.sql"
+fail_on_contention: true
 accept_hazards:
   - DROP_TABLE
   - DROP_COLUMN
@@ -50,14 +51,17 @@ lint:
 	if cfg.Dialect != "postgres" {
 		t.Errorf("expected Dialect postgres, got %s", cfg.Dialect)
 	}
-	if cfg.TargetSchema != "public" {
-		t.Errorf("expected TargetSchema public, got %s", cfg.TargetSchema)
+	if cfg.TargetSchemaPattern != "tenant_%" {
+		t.Errorf("expected TargetSchemaPattern tenant_%%, got %s", cfg.TargetSchemaPattern)
 	}
 	if !cfg.AllowDrop {
 		t.Errorf("expected AllowDrop true")
 	}
 	if cfg.BeforeSync != "db/before.sql" {
 		t.Errorf("expected BeforeSync, got %s", cfg.BeforeSync)
+	}
+	if !cfg.FailOnContention {
+		t.Errorf("expected FailOnContention true")
 	}
 	if len(cfg.AcceptHazards) != 2 || cfg.AcceptHazards[0] != "DROP_TABLE" || cfg.AcceptHazards[1] != "DROP_COLUMN" {
 		t.Errorf("unexpected AcceptHazards: %+v", cfg.AcceptHazards)

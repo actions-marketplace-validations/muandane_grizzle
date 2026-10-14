@@ -58,6 +58,11 @@ type Options struct {
     // For SQLite, entries other than "main" are ATTACH DATABASE names listed in SQLiteAttach.
     TargetSchemas []string
 
+    // TargetSchemaPattern specifies a LIKE-style pattern to discover target PostgreSQL schemas
+    // dynamically from pg_namespace (e.g. "tenant_%"). Discovered schemas are sorted deterministically,
+    // exclude system schemas (pg_*, information_schema, _grizzle*), and populate TargetSchemas.
+    TargetSchemaPattern string
+
     // SQLiteAttach maps ATTACH DATABASE schema names to filesystem paths.
     // Every TargetSchemas entry other than "main" must appear here; "main" is
     // the primary database already open and must not be listed. Unknown keys,
@@ -68,6 +73,13 @@ type Options struct {
     // Must use the reserved "_grizzle_shadow" prefix, be a valid identifier of at most 63 bytes,
     // and must not name a target or included schema; violations fail with ErrInvalidOptions.
     ShadowSchema string
+
+    // DevDatabaseURL optionally specifies an external PostgreSQL database connection string
+    // used to compile and introspect shadow schemas instead of compiling them against the target database.
+    // When unset, shadow schemas compile against the target database connection.
+    // If the target database user lacks CREATE SCHEMA privileges and no DevDatabaseURL is set,
+    // Grizzle returns a clear error naming the fix without silent fallbacks.
+    DevDatabaseURL string
 
     // AllowDrop permits all destructive operations when set to true.
     // Defaults to false for zero data loss.
@@ -162,6 +174,14 @@ type Options struct {
     // AfterStep executes immediately after each successful plan step.
     AfterStep StepHook
 
+    // FailOnContention gates execution if lock contention is detected on target tables
+    // before running DDL requiring strong locks (PostgreSQL only). When false (default),
+    // contention is logged as a warning (advisory mode). When true, Grizzle retries with
+    // backoff up to LockTimeout, aborting with ErrLockContention if contention persists.
+    // Note: this pre-flight check is inherently racy (point-in-time snapshot) and must
+    // be accompanied by lock_timeout enforcement.
+    FailOnContention bool
+
     // DryRun outputs planned statements without executing them.
     DryRun bool
 
@@ -196,6 +216,9 @@ type Options struct {
 
     // Tracer receives lifecycle spans (sync start/end, step execution, lock wait).
     Tracer Tracer
+
+    // Metrics receives operational metrics (migration_duration_seconds, drift_detected, lock_wait_seconds).
+    Metrics Metrics
 }
 ```
 
@@ -574,6 +597,9 @@ The `RENAME_AMBIGUOUS` hazard description and the interactive summary remediatio
 ### Invariant 8: History and drift detection
 Applied plans are audited in `grizzle_history`. `Check()` provides read-only schema drift verification. A failed success-path history write does not fail the applied migration: it is logged at ERROR and surfaced as a typed non-fatal error (`errors.Is(err, grizzle.ErrHistoryRecord)`); failure-path history write failures are logged and never swallowed.
 
+### Invariant 9: Readiness probe
+`grizzle.IsReady(ctx, db, opts...)` inspects the latest migration record in `grizzle_history` with zero side effects: it never executes DDL, never creates tables, and never acquires advisory locks. It returns `(true, nil)` when the latest record has status `"applied"` or `"baseline"`, `(false, nil)` when unmigrated or ending in a non-ready status (`"failed"`, `"partial"`), and `(false, err)` on database connectivity failure.
+
 ## 5. Error taxonomy
 
 ```go
@@ -589,6 +615,7 @@ var (
     ErrPlanDrift          = errors.New("grizzle: plan drifted from approved state")
     ErrDrift              = errors.New("grizzle: live database schema has drifted from desired schema")
     ErrLockTimeout             = errors.New("grizzle: lock acquisition timed out")
+    ErrLockContention          = errors.New("grizzle: lock contention detected on target table")
     ErrInvalidOptions          = errors.New("grizzle: invalid options")
     ErrStrictScope             = errors.New("grizzle: strict scope requires non-empty IncludeTables")
     ErrPartitionConversion     = errors.New("grizzle: in-place conversion between regular and partitioned table is unsupported")

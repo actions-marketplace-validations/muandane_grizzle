@@ -41,6 +41,8 @@ func TestOptions_FunctionalOptions(t *testing.T) {
 		grizzle.WithRenames(map[string]string{"users.legacy": "modern"}),
 		grizzle.WithExpandContract(true),
 		grizzle.WithBackfill(backfillFn),
+		grizzle.WithTargetSchemaPattern("tenant_%"),
+		grizzle.WithFailOnContention(true),
 	}
 
 	for _, opt := range applyOptions {
@@ -94,6 +96,12 @@ func TestOptions_FunctionalOptions(t *testing.T) {
 	}
 	if opts.Backfill == nil {
 		t.Errorf("backfill not set")
+	}
+	if opts.TargetSchemaPattern != "tenant_%" {
+		t.Errorf("target schema pattern not set, got %q", opts.TargetSchemaPattern)
+	}
+	if !opts.FailOnContention {
+		t.Errorf("fail on contention not set")
 	}
 }
 
@@ -149,6 +157,48 @@ func TestOptions_Validate(t *testing.T) {
 	}
 	if err := o6.Validate(); !errors.Is(err, grizzle.ErrInvalidOptions) {
 		t.Errorf("malformed extracted role statement should be invalid options, got: %v", err)
+	}
+
+	// TargetSchemaPattern on SQLite must fail
+	o7 := grizzle.Options{
+		SchemaSQL:           "CREATE TABLE t (id INT);",
+		Dialect:             grizzle.DialectSQLite,
+		TargetSchemaPattern: "tenant_%",
+	}
+	if err := o7.Validate(); !errors.Is(err, grizzle.ErrInvalidOptions) {
+		t.Errorf("expected ErrInvalidOptions for TargetSchemaPattern on SQLite, got: %v", err)
+	}
+
+	// TargetSchemaPattern with TargetSchemas must fail
+	o8 := grizzle.Options{
+		SchemaSQL:           "CREATE TABLE t (id INT);",
+		Dialect:             grizzle.DialectPostgres,
+		TargetSchemaPattern: "tenant_%",
+		TargetSchemas:       []string{"tenant_1"},
+	}
+	if err := o8.Validate(); !errors.Is(err, grizzle.ErrInvalidOptions) {
+		t.Errorf("expected ErrInvalidOptions for TargetSchemaPattern with TargetSchemas, got: %v", err)
+	}
+
+	// TargetSchemaPattern with TargetSchema must fail
+	o9 := grizzle.Options{
+		SchemaSQL:           "CREATE TABLE t (id INT);",
+		Dialect:             grizzle.DialectPostgres,
+		TargetSchemaPattern: "tenant_%",
+		TargetSchema:        "tenant_1",
+	}
+	if err := o9.Validate(); !errors.Is(err, grizzle.ErrInvalidOptions) {
+		t.Errorf("expected ErrInvalidOptions for TargetSchemaPattern with TargetSchema, got: %v", err)
+	}
+
+	// FailOnContention on SQLite must fail
+	o10 := grizzle.Options{
+		SchemaSQL:        "CREATE TABLE t (id INT);",
+		Dialect:          grizzle.DialectSQLite,
+		FailOnContention: true,
+	}
+	if err := o10.Validate(); !errors.Is(err, grizzle.ErrInvalidOptions) {
+		t.Errorf("expected ErrInvalidOptions for FailOnContention on SQLite, got: %v", err)
 	}
 }
 
@@ -284,6 +334,79 @@ func TestOptions_Tracer(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("sync failed: %v", err)
+	}
+}
+
+type mockMetrics struct {
+	durations []struct {
+		duration time.Duration
+		dialect  string
+		status   string
+	}
+	drifts []struct {
+		dialect string
+		schema  string
+	}
+	lockWaits []struct {
+		duration time.Duration
+		dialect  string
+	}
+}
+
+func (m *mockMetrics) RecordMigrationDuration(ctx context.Context, d time.Duration, dialect, status string) {
+	m.durations = append(m.durations, struct {
+		duration time.Duration
+		dialect  string
+		status   string
+	}{d, dialect, status})
+}
+
+func (m *mockMetrics) RecordDriftDetected(ctx context.Context, dialect, schema string) {
+	m.drifts = append(m.drifts, struct {
+		dialect string
+		schema  string
+	}{dialect, schema})
+}
+
+func (m *mockMetrics) RecordLockWait(ctx context.Context, d time.Duration, dialect string) {
+	m.lockWaits = append(m.lockWaits, struct {
+		duration time.Duration
+		dialect  string
+	}{d, dialect})
+}
+
+func TestOptions_Metrics(t *testing.T) {
+	metrics := &mockMetrics{}
+	opts := grizzle.Options{}
+	grizzle.WithMetrics(metrics)(&opts)
+	if opts.Metrics != metrics {
+		t.Fatalf("expected Metrics to be set")
+	}
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("opening sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	schema := "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);"
+	err = grizzle.Sync(context.Background(), db, grizzle.Options{
+		Dialect:   grizzle.DialectSQLite,
+		SchemaSQL: schema,
+		Metrics:   metrics,
+	})
+	if err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+
+	if len(metrics.durations) != 1 {
+		t.Fatalf("expected 1 duration recorded, got %d", len(metrics.durations))
+	}
+	if metrics.durations[0].status != "applied" {
+		t.Errorf("expected status 'applied', got %q", metrics.durations[0].status)
+	}
+	if metrics.durations[0].dialect != "sqlite" {
+		t.Errorf("expected dialect 'sqlite', got %q", metrics.durations[0].dialect)
 	}
 }
 

@@ -335,7 +335,23 @@ func prepareOptions(ctx context.Context, db *sql.DB, opts *Options) error {
 		}
 	case DialectPostgres:
 		opts.LockNamespace = cmp.Or(opts.LockNamespace, "grizzle")
-		if len(opts.TargetSchemas) > 0 {
+		if opts.TargetSchemaPattern != "" {
+			if len(opts.TargetSchemas) > 0 || opts.TargetSchema != "" {
+				return fmt.Errorf("%w: cannot specify both TargetSchemaPattern and TargetSchema/TargetSchemas", ErrInvalidOptions)
+			}
+			if db == nil {
+				return fmt.Errorf("%w: database connection required to discover schemas with TargetSchemaPattern", ErrInvalidOptions)
+			}
+			schemas, err := postgres.DiscoverSchemas(ctx, db, opts.TargetSchemaPattern)
+			if err != nil {
+				return err
+			}
+			if len(schemas) == 0 {
+				return fmt.Errorf("%w %q", ErrNoMatchingSchemas, opts.TargetSchemaPattern)
+			}
+			opts.TargetSchemas = schemas
+			opts.TargetSchema = schemas[0]
+		} else if len(opts.TargetSchemas) > 0 {
 			slices.Sort(opts.TargetSchemas)
 			opts.TargetSchemas = slices.Compact(opts.TargetSchemas)
 			if opts.TargetSchema == "" {
@@ -363,6 +379,20 @@ func prepareOptions(ctx context.Context, db *sql.DB, opts *Options) error {
 	return nil
 }
 
+func openDevDB(opts Options) (*sql.DB, func(), error) {
+	if opts.DevDatabaseURL == "" || opts.Dialect != DialectPostgres {
+		return nil, func() {}, nil
+	}
+	devDB, err := sql.Open("pgx", opts.DevDatabaseURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("grizzle: failed to open dev database: %w", err)
+	}
+	cleanup := func() {
+		_ = devDB.Close()
+	}
+	return devDB, cleanup, nil
+}
+
 // Sync synchronizes the target database schema to match the desired state in opts.SchemaSQL.
 func Sync(ctx context.Context, db *sql.DB, opts Options) error {
 	if err := prepareOptions(ctx, db, &opts); err != nil {
@@ -371,6 +401,12 @@ func Sync(ctx context.Context, db *sql.DB, opts Options) error {
 
 	policy := resolveDropPolicy(opts)
 	filters := toScopeFilters(opts)
+
+	devDB, cleanupDevDB, err := openDevDB(opts)
+	if err != nil {
+		return err
+	}
+	defer cleanupDevDB()
 
 	var syncErr error
 	if opts.Dialect == DialectSQLite {
@@ -386,6 +422,7 @@ func Sync(ctx context.Context, db *sql.DB, opts Options) error {
 			ExpectedHash:       opts.ExpectedHash,
 			Logger:             opts.Logger,
 			Tracer:             opts.Tracer,
+			Metrics:            opts.Metrics,
 			DryRun:             opts.DryRun,
 			Backfill:           toExecBackfill(opts.Backfill),
 			BeforeSync:         opts.BeforeSync,
@@ -417,12 +454,15 @@ func Sync(ctx context.Context, db *sql.DB, opts Options) error {
 			RandFloat:            opts.RandFloat,
 			Logger:               opts.Logger,
 			Tracer:               opts.Tracer,
+			Metrics:              opts.Metrics,
 			DryRun:               opts.DryRun,
 			Backfill:             toExecBackfill(opts.Backfill),
 			BeforeSync:           opts.BeforeSync,
 			AfterSync:            opts.AfterSync,
 			BeforeStep:           opts.BeforeStep,
 			AfterStep:            opts.AfterStep,
+			DevDB:                devDB,
+			FailOnContention:     opts.FailOnContention,
 		})
 	}
 	if syncErr != nil {
@@ -511,6 +551,12 @@ func PlanDiff(ctx context.Context, db *sql.DB, opts Options) (*Plan, error) {
 		})
 	}
 
+	devDB, cleanupDevDB, err := openDevDB(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanupDevDB()
+
 	return exec.PlanDiffPostgres(ctx, db, exec.PostgresExecConfig{
 		TargetSchema:         opts.TargetSchema,
 		TargetSchemas:        opts.TargetSchemas,
@@ -530,6 +576,7 @@ func PlanDiff(ctx context.Context, db *sql.DB, opts Options) (*Plan, error) {
 		Logger:               opts.Logger,
 		Tracer:               opts.Tracer,
 		DryRun:               opts.DryRun,
+		DevDB:                devDB,
 	})
 }
 
@@ -573,12 +620,25 @@ type ApplyOpts struct {
 	// LockNamespace specifies the application namespace string used for PostgreSQL advisory locking (defaults to "grizzle").
 	LockNamespace string
 
+	// DevDatabaseURL optionally specifies an external database connection URL
+	// used for shadow schema compilation during plan verification.
+	DevDatabaseURL string
+
+	// FailOnContention gates DDL execution on PostgreSQL: if concurrent sessions hold conflicting
+	// locks on target tables, retry with backoff up to LockTimeout; if contention persists, abort
+	// with ErrLockContention instead of proceeding. When false (default), lock contention is advisory
+	// and logs a warning before proceeding.
+	FailOnContention bool
+
 	// Logger receives structured migration logs during Apply (defaults to no logging).
 	// The plan artifact cannot carry a logger, so it is supplied here.
 	Logger *slog.Logger
 
 	// Tracer specifies an optional tracer for observing plan application.
 	Tracer Tracer
+
+	// Metrics specifies an optional metrics recorder for observing plan application.
+	Metrics Metrics
 }
 
 // optionsFromPlan maps every approval-relevant plan field into Options.
@@ -632,8 +692,11 @@ func optionsFromPlan(p *Plan, opts ApplyOpts) Options {
 		StatementTimeout:         p.StatementTimeout,
 		NonConcurrentIndexes:     p.NonConcurrentIndexes,
 		ExpectedHash:             opts.ExpectedHash,
+		DevDatabaseURL:           opts.DevDatabaseURL,
+		FailOnContention:         opts.FailOnContention,
 		Logger:                   opts.Logger,
 		Tracer:                   opts.Tracer,
+		Metrics:                  opts.Metrics,
 	}
 }
 
@@ -647,6 +710,10 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 		return fmt.Errorf("grizzle: database connection is nil")
 	}
 	if opts.ExpectedHash != "" && p.Hash() != opts.ExpectedHash {
+		if opts.Metrics != nil {
+			d, _ := detectDialect(ctx, db)
+			opts.Metrics.RecordDriftDetected(ctx, string(d), p.TargetSchema)
+		}
 		return fmt.Errorf("%w: plan hash %q does not match expected hash %q", ErrPlanDrift, p.Hash(), opts.ExpectedHash)
 	}
 
@@ -676,6 +743,7 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 				ExpectedHash:     opts.ExpectedHash,
 				Logger:           syncOpts.Logger,
 				Tracer:           syncOpts.Tracer,
+				Metrics:          syncOpts.Metrics,
 				DryRun:           syncOpts.DryRun,
 				Backfill:         toExecBackfill(opts.Backfill),
 				BeforeSync:       opts.BeforeSync,
@@ -707,8 +775,10 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 			RandFloat:            syncOpts.RandFloat,
 			Logger:               syncOpts.Logger,
 			Tracer:               syncOpts.Tracer,
+			Metrics:              syncOpts.Metrics,
 			DryRun:               syncOpts.DryRun,
 			Backfill:             toExecBackfill(opts.Backfill),
+			FailOnContention:     syncOpts.FailOnContention,
 		})
 	}
 
@@ -751,6 +821,7 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 			AcceptHazards:    opts.AcceptHazards,
 			ExpectedHash:     opts.ExpectedHash,
 			Tracer:           opts.Tracer,
+			Metrics:          opts.Metrics,
 			Logger:           opts.Logger,
 			Backfill:         toExecBackfill(opts.Backfill),
 			BeforeSync:       opts.BeforeSync,
@@ -774,6 +845,7 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 			AcceptHazards:        opts.AcceptHazards,
 			ExpectedHash:         opts.ExpectedHash,
 			Tracer:               opts.Tracer,
+			Metrics:              opts.Metrics,
 			Logger:               opts.Logger,
 			NonConcurrentIndexes: p.NonConcurrentIndexes,
 			LockTimeout:          cmp.Or(p.LockTimeout, exec.DefaultLockTimeout),
@@ -784,6 +856,7 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 			AfterSync:            opts.AfterSync,
 			BeforeStep:           opts.BeforeStep,
 			AfterStep:            opts.AfterStep,
+			FailOnContention:     opts.FailOnContention,
 		})
 	default:
 		return fmt.Errorf("grizzle: unsupported dialect %q", dialect)
@@ -800,6 +873,9 @@ func Check(ctx context.Context, db *sql.DB, opts Options) error {
 	}
 
 	if len(p.Steps) > 0 {
+		if opts.Metrics != nil {
+			opts.Metrics.RecordDriftDetected(ctx, string(opts.Dialect), opts.TargetSchema)
+		}
 		return &plan.DriftError{Plan: p}
 	}
 
@@ -901,11 +977,16 @@ func CompileSchema(ctx context.Context, db *sql.DB, opts Options) (*SchemaIR, er
 		}
 		targetSchema := cmp.Or(opts.TargetSchema, "public")
 		shadowSchema := cmp.Or(opts.ShadowSchema, "_grizzle_shadow")
-		var err error
+		devDB, cleanupDevDB, err := openDevDB(opts)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanupDevDB()
 		s, err = exec.CompileSchemaPostgres(ctx, db, exec.PostgresExecConfig{
 			TargetSchema: targetSchema,
 			ShadowSchema: shadowSchema,
 			SchemaSQL:    opts.SchemaSQL,
+			DevDB:        devDB,
 		})
 		if err != nil {
 			return nil, err
@@ -1099,6 +1180,12 @@ func DryRunVerify(ctx context.Context, db *sql.DB, opts Options) (*DryRunResult,
 		})
 	}
 
+	devDB, cleanupDevDB, err := openDevDB(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanupDevDB()
+
 	return exec.DryRunVerifyPostgres(ctx, db, exec.PostgresExecConfig{
 		TargetSchema:         opts.TargetSchema,
 		TargetSchemas:        opts.TargetSchemas,
@@ -1122,6 +1209,7 @@ func DryRunVerify(ctx context.Context, db *sql.DB, opts Options) (*DryRunResult,
 		AfterStep:            opts.AfterStep,
 		DryRunLockTimeout:    opts.DryRunLockTimeout,
 		ExecuteHooksInDryRun: opts.ExecuteHooksInDryRun,
+		DevDB:                devDB,
 	})
 }
 
@@ -1175,9 +1263,10 @@ type StatusReport struct {
 
 // BaselineOptions configures baselining an existing database.
 type BaselineOptions struct {
-	TargetSchema string
-	Note         string
-	Force        bool // If true, record baseline even if unapplied changes exist
+	TargetSchema   string
+	Note           string
+	Force          bool // If true, record baseline even if unapplied changes exist
+	DevDatabaseURL string
 }
 
 // RepairOptions configures repairing failed/partial migration history.
@@ -1291,6 +1380,67 @@ func Status(ctx context.Context, db *sql.DB, opts Options) (*StatusReport, error
 	}, nil
 }
 
+// IsReady checks whether the database is ready for application traffic by inspecting
+// the latest migration state in grizzle_history. It reads migration state only with
+// zero side effects (no DDL, no table creation) and without acquiring any advisory locks.
+//
+// It returns:
+//   - (true, nil) if the latest migration record has status "applied" or "baseline".
+//   - (false, nil) if grizzle_history does not exist, is empty, or the latest record
+//     has a non-ready status ("partial", "failed", "in_progress").
+//   - (false, err) if database connectivity or the query fails.
+func IsReady(ctx context.Context, db *sql.DB, opts ...Option) (bool, error) {
+	if db == nil {
+		return false, fmt.Errorf("grizzle: database connection is nil")
+	}
+
+	var o Options
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+
+	if o.Dialect == DialectAuto {
+		d, err := detectDialect(ctx, db)
+		if err != nil {
+			return false, err
+		}
+		o.Dialect = d
+	}
+
+	targetSchemas := o.TargetSchemas
+	if len(targetSchemas) == 0 {
+		targetSchema := o.TargetSchema
+		if targetSchema == "" {
+			if o.Dialect == DialectSQLite {
+				targetSchema = "main"
+			} else {
+				targetSchema = "public"
+			}
+		}
+		targetSchemas = []string{targetSchema}
+	}
+
+	for _, s := range targetSchemas {
+		latest, err := history.GetLatest(ctx, db, string(o.Dialect), s)
+		if err != nil {
+			return false, fmt.Errorf("grizzle: querying readiness state: %w", err)
+		}
+		if latest == nil {
+			return false, nil
+		}
+		switch strings.ToLower(strings.TrimSpace(latest.Status)) {
+		case "applied", "baseline":
+			// ready for this schema
+		default:
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
 // Baseline marks an existing database as synchronized with the desired schema,
 // inserting a baseline record into grizzle_history without executing DDL.
 // If the database differs from desired schema and opts.Force is false,
@@ -1316,9 +1466,10 @@ func Baseline(ctx context.Context, db *sql.DB, schemaSQL string, opts BaselineOp
 	}
 
 	planOpts := Options{
-		Dialect:      d,
-		SchemaSQL:    schemaSQL,
-		TargetSchema: targetSchema,
+		Dialect:        d,
+		SchemaSQL:      schemaSQL,
+		TargetSchema:   targetSchema,
+		DevDatabaseURL: opts.DevDatabaseURL,
 	}
 	diffPlan, err := PlanDiff(ctx, db, planOpts)
 	if err != nil {
