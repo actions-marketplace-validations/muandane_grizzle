@@ -37,6 +37,13 @@ type Span interface {
 	SetAttribute(key string, value any)
 }
 
+// Metrics defines the interface for recording Grizzle operational metrics.
+type Metrics interface {
+	RecordMigrationDuration(ctx context.Context, duration time.Duration, dialect string, status string)
+	RecordDriftDetected(ctx context.Context, dialect string, schema string)
+	RecordLockWait(ctx context.Context, duration time.Duration, dialect string)
+}
+
 // PostgresExecConfig specifies the execution options for PostgreSQL synchronization.
 type PostgresExecConfig struct {
 	TargetSchema         string
@@ -60,6 +67,7 @@ type PostgresExecConfig struct {
 	RandFloat            func() float64
 	Logger               *slog.Logger
 	Tracer               Tracer
+	Metrics              Metrics
 	DryRun               bool
 	Backfill             BackfillFunc
 	BeforeSync           SyncHook
@@ -420,7 +428,21 @@ func (t *lockBudgetTracker) reserve(d time.Duration) bool {
 }
 
 // SyncPostgres synchronizes PostgreSQL with session-level advisory locking, timeouts, and retry logic.
-func SyncPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) error {
+func SyncPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) (err error) {
+	start := time.Now()
+	var totalCommitted int
+	defer func() {
+		if cfg.Metrics != nil {
+			status := "applied"
+			if err != nil {
+				status = "failed"
+			} else if totalCommitted == 0 {
+				status = "noop"
+			}
+			cfg.Metrics.RecordMigrationDuration(ctx, time.Since(start), "postgres", status)
+		}
+	}()
+
 	maxRetries := max(cfg.MaxRetries, 0)
 
 	// LockTimeout bounds the TOTAL advisory-lock acquisition wait across
@@ -435,8 +457,9 @@ func SyncPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) error
 
 	attempt := 0
 	for {
-		committed, err := syncPostgresOnce(ctx, db, cfg, budget)
-		if err == nil {
+		committed, syncErr := syncPostgresOnce(ctx, db, cfg, budget)
+		if syncErr == nil {
+			totalCommitted = committed
 			if cfg.Backfill != nil && cfg.Filters.ExpandContract {
 				if err := RunBackfill(ctx, db, cfg.TargetSchema, cfg.Filters.Renames, nil, cfg.Backfill, cfg.Logger); err != nil {
 					return err
@@ -444,6 +467,7 @@ func SyncPostgres(ctx context.Context, db *sql.DB, cfg PostgresExecConfig) error
 			}
 			return nil
 		}
+		err = syncErr
 
 		// Only retry before any step has committed. After partial progress: abort, require re-plan.
 		if committed > 0 || !IsRetryable(err) || attempt >= maxRetries {
@@ -537,7 +561,11 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 		acquiredSchemas, err = postgres.AcquireSchemaLocks(lockCtx, conn, lockNs, targetSchemas)
 	}
 	cancelLock()
-	budget.recordWait(time.Since(lockStart))
+	lockWaitDuration := time.Since(lockStart)
+	budget.recordWait(lockWaitDuration)
+	if cfg.Metrics != nil {
+		cfg.Metrics.RecordLockWait(ctx, lockWaitDuration, "postgres")
+	}
 	if lockSpan != nil {
 		if err != nil {
 			lockSpan.RecordError(err)
@@ -681,6 +709,9 @@ func syncPostgresOnce(ctx context.Context, db *sql.DB, cfg PostgresExecConfig, b
 
 	// 4b. Verify expected plan hash if provided (aborts with ErrPlanDrift on mismatch)
 	if cfg.ExpectedHash != "" && p.Hash() != cfg.ExpectedHash {
+		if cfg.Metrics != nil {
+			cfg.Metrics.RecordDriftDetected(ctx, "postgres", primarySchema)
+		}
 		if logger != nil {
 			logger.WarnContext(ctx, "grizzle: plan drift detected post-lock", "expected", cfg.ExpectedHash, "actual", p.Hash())
 		}
@@ -1047,6 +1078,7 @@ type SQLiteExecConfig struct {
 	ExpectedHash         string
 	Logger               *slog.Logger
 	Tracer               Tracer
+	Metrics              Metrics
 	DryRun               bool
 	Backfill             BackfillFunc
 	BeforeSync           SyncHook
@@ -1079,15 +1111,27 @@ func (cfg SQLiteExecConfig) needsAttach() bool {
 }
 
 // SyncSQLite synchronizes SQLite in a single transaction with foreign keys handling.
-func SyncSQLite(ctx context.Context, db *sql.DB, cfg SQLiteExecConfig) error {
+func SyncSQLite(ctx context.Context, db *sql.DB, cfg SQLiteExecConfig) (err error) {
 	start := time.Now()
+	var p *plan.Plan
+	defer func() {
+		if cfg.Metrics != nil {
+			status := "applied"
+			if err != nil {
+				status = "failed"
+			} else if p == nil || len(p.Steps) == 0 {
+				status = "noop"
+			}
+			cfg.Metrics.RecordMigrationDuration(ctx, time.Since(start), "sqlite", status)
+		}
+	}()
+
 	logger := cfg.Logger
 	schemas := cfg.targetSchemas()
 	if logger != nil {
 		logger.InfoContext(ctx, "sqlite: starting SQLite schema synchronization", "target_schemas", schemas)
 	}
 
-	var p *plan.Plan
 	var histErr error
 
 	run := func(conn *sql.Conn) error {
@@ -1122,6 +1166,9 @@ func SyncSQLite(ctx context.Context, db *sql.DB, cfg SQLiteExecConfig) error {
 		}
 
 		if cfg.ExpectedHash != "" && p.Hash() != cfg.ExpectedHash {
+			if cfg.Metrics != nil {
+				cfg.Metrics.RecordDriftDetected(ctx, "sqlite", cfg.primarySchema())
+			}
 			if logger != nil {
 				logger.WarnContext(ctx, "sqlite: plan drift detected post-lock", "expected", cfg.ExpectedHash, "actual", p.Hash())
 			}
@@ -1226,7 +1273,6 @@ func SyncSQLite(ctx context.Context, db *sql.DB, cfg SQLiteExecConfig) error {
 		return err
 	}
 
-	var err error
 	if cfg.needsAttach() {
 		err = withSQLiteAttachedConn(ctx, db, cfg.SQLiteAttach, run)
 	} else {
@@ -1284,7 +1330,21 @@ func PlanDiffSQLite(ctx context.Context, db *sql.DB, cfg SQLiteExecConfig) (*pla
 
 // ApplyPostgres applies a precomputed plan to PostgreSQL using a dedicated connection,
 // session-level advisory locking, step grouping (NonTx vs Tx), timeouts, and retry logic.
-func ApplyPostgres(ctx context.Context, db *sql.DB, p *plan.Plan, cfg PostgresExecConfig) error {
+func ApplyPostgres(ctx context.Context, db *sql.DB, p *plan.Plan, cfg PostgresExecConfig) (err error) {
+	start := time.Now()
+	var totalCommitted int
+	defer func() {
+		if cfg.Metrics != nil && p != nil {
+			status := "applied"
+			if err != nil {
+				status = "failed"
+			} else if totalCommitted == 0 || len(p.Steps) == 0 {
+				status = "noop"
+			}
+			cfg.Metrics.RecordMigrationDuration(ctx, time.Since(start), "postgres", status)
+		}
+	}()
+
 	if p == nil {
 		return fmt.Errorf("grizzle: plan cannot be nil")
 	}
@@ -1328,8 +1388,9 @@ func ApplyPostgres(ctx context.Context, db *sql.DB, p *plan.Plan, cfg PostgresEx
 	attempt := 0
 
 	for {
-		committed, err := applyPostgresOnce(ctx, db, p, cfg, budget)
-		if err == nil {
+		committed, applyErr := applyPostgresOnce(ctx, db, p, cfg, budget)
+		if applyErr == nil {
+			totalCommitted = committed
 			if cfg.Backfill != nil && p.ExpandContract {
 				if err := RunBackfill(ctx, db, cfg.TargetSchema, p.Renames, nil, cfg.Backfill, cfg.Logger); err != nil {
 					return err
@@ -1337,6 +1398,7 @@ func ApplyPostgres(ctx context.Context, db *sql.DB, p *plan.Plan, cfg PostgresEx
 			}
 			return nil
 		}
+		err = applyErr
 
 		// Only retry before any step has committed. After partial progress: abort, require re-plan.
 		if committed > 0 || !IsRetryable(err) || attempt >= maxRetries {
@@ -1423,7 +1485,11 @@ func applyPostgresOnce(ctx context.Context, db *sql.DB, p *plan.Plan, cfg Postgr
 		acquiredSchemas, err = postgres.AcquireSchemaLocks(lockCtx, conn, lockNs, targetSchemas)
 	}
 	cancelLock()
-	budget.recordWait(time.Since(lockStart))
+	lockWaitDuration := time.Since(lockStart)
+	budget.recordWait(lockWaitDuration)
+	if cfg.Metrics != nil {
+		cfg.Metrics.RecordLockWait(ctx, lockWaitDuration, "postgres")
+	}
 	if lockSpan != nil {
 		if err != nil {
 			lockSpan.RecordError(err)
@@ -1666,7 +1732,20 @@ func applyPostgresOnce(ctx context.Context, db *sql.DB, p *plan.Plan, cfg Postgr
 }
 
 // ApplySQLite applies a precomputed plan to SQLite in a single transaction with foreign keys handling.
-func ApplySQLite(ctx context.Context, db *sql.DB, p *plan.Plan, cfg SQLiteExecConfig) error {
+func ApplySQLite(ctx context.Context, db *sql.DB, p *plan.Plan, cfg SQLiteExecConfig) (err error) {
+	start := time.Now()
+	defer func() {
+		if cfg.Metrics != nil && p != nil {
+			status := "applied"
+			if err != nil {
+				status = "failed"
+			} else if len(p.Steps) == 0 {
+				status = "noop"
+			}
+			cfg.Metrics.RecordMigrationDuration(ctx, time.Since(start), "sqlite", status)
+		}
+	}()
+
 	if p == nil {
 		return fmt.Errorf("sqlite: plan cannot be nil")
 	}
@@ -1693,7 +1772,6 @@ func ApplySQLite(ctx context.Context, db *sql.DB, p *plan.Plan, cfg SQLiteExecCo
 		return nil
 	}
 
-	start := time.Now()
 	logger := cfg.Logger
 	if logger != nil {
 		logger.InfoContext(ctx, "sqlite: starting SQLite plan application")
@@ -1705,7 +1783,7 @@ func ApplySQLite(ctx context.Context, db *sql.DB, p *plan.Plan, cfg SQLiteExecCo
 	}
 
 	var histErr error
-	err := withSQLiteAttachedConn(ctx, db, cfg.SQLiteAttach, func(conn *sql.Conn) error {
+	err = withSQLiteAttachedConn(ctx, db, cfg.SQLiteAttach, func(conn *sql.Conn) error {
 		// BeforeSync runs once before any migration steps are executed.
 		if err := callBeforeSync(cfg.BeforeSync, ctx, conn); err != nil {
 			hookErr := fmt.Errorf("sqlite: before_sync hook: %w", err)

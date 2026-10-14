@@ -337,6 +337,79 @@ func TestOptions_Tracer(t *testing.T) {
 	}
 }
 
+type mockMetrics struct {
+	durations []struct {
+		duration time.Duration
+		dialect  string
+		status   string
+	}
+	drifts []struct {
+		dialect string
+		schema  string
+	}
+	lockWaits []struct {
+		duration time.Duration
+		dialect  string
+	}
+}
+
+func (m *mockMetrics) RecordMigrationDuration(ctx context.Context, d time.Duration, dialect, status string) {
+	m.durations = append(m.durations, struct {
+		duration time.Duration
+		dialect  string
+		status   string
+	}{d, dialect, status})
+}
+
+func (m *mockMetrics) RecordDriftDetected(ctx context.Context, dialect, schema string) {
+	m.drifts = append(m.drifts, struct {
+		dialect string
+		schema  string
+	}{dialect, schema})
+}
+
+func (m *mockMetrics) RecordLockWait(ctx context.Context, d time.Duration, dialect string) {
+	m.lockWaits = append(m.lockWaits, struct {
+		duration time.Duration
+		dialect  string
+	}{d, dialect})
+}
+
+func TestOptions_Metrics(t *testing.T) {
+	metrics := &mockMetrics{}
+	opts := grizzle.Options{}
+	grizzle.WithMetrics(metrics)(&opts)
+	if opts.Metrics != metrics {
+		t.Fatalf("expected Metrics to be set")
+	}
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("opening sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	schema := "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);"
+	err = grizzle.Sync(context.Background(), db, grizzle.Options{
+		Dialect:   grizzle.DialectSQLite,
+		SchemaSQL: schema,
+		Metrics:   metrics,
+	})
+	if err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+
+	if len(metrics.durations) != 1 {
+		t.Fatalf("expected 1 duration recorded, got %d", len(metrics.durations))
+	}
+	if metrics.durations[0].status != "applied" {
+		t.Errorf("expected status 'applied', got %q", metrics.durations[0].status)
+	}
+	if metrics.durations[0].dialect != "sqlite" {
+		t.Errorf("expected dialect 'sqlite', got %q", metrics.durations[0].dialect)
+	}
+}
+
 func TestOptions_Presets(t *testing.T) {
 	schemaSQL := "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);"
 

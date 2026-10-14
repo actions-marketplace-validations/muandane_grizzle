@@ -422,6 +422,7 @@ func Sync(ctx context.Context, db *sql.DB, opts Options) error {
 			ExpectedHash:       opts.ExpectedHash,
 			Logger:             opts.Logger,
 			Tracer:             opts.Tracer,
+			Metrics:            opts.Metrics,
 			DryRun:             opts.DryRun,
 			Backfill:           toExecBackfill(opts.Backfill),
 			BeforeSync:         opts.BeforeSync,
@@ -453,6 +454,7 @@ func Sync(ctx context.Context, db *sql.DB, opts Options) error {
 			RandFloat:            opts.RandFloat,
 			Logger:               opts.Logger,
 			Tracer:               opts.Tracer,
+			Metrics:              opts.Metrics,
 			DryRun:               opts.DryRun,
 			Backfill:             toExecBackfill(opts.Backfill),
 			BeforeSync:           opts.BeforeSync,
@@ -634,6 +636,9 @@ type ApplyOpts struct {
 
 	// Tracer specifies an optional tracer for observing plan application.
 	Tracer Tracer
+
+	// Metrics specifies an optional metrics recorder for observing plan application.
+	Metrics Metrics
 }
 
 // optionsFromPlan maps every approval-relevant plan field into Options.
@@ -691,6 +696,7 @@ func optionsFromPlan(p *Plan, opts ApplyOpts) Options {
 		FailOnContention:         opts.FailOnContention,
 		Logger:                   opts.Logger,
 		Tracer:                   opts.Tracer,
+		Metrics:                  opts.Metrics,
 	}
 }
 
@@ -704,6 +710,10 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 		return fmt.Errorf("grizzle: database connection is nil")
 	}
 	if opts.ExpectedHash != "" && p.Hash() != opts.ExpectedHash {
+		if opts.Metrics != nil {
+			d, _ := detectDialect(ctx, db)
+			opts.Metrics.RecordDriftDetected(ctx, string(d), p.TargetSchema)
+		}
 		return fmt.Errorf("%w: plan hash %q does not match expected hash %q", ErrPlanDrift, p.Hash(), opts.ExpectedHash)
 	}
 
@@ -733,6 +743,7 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 				ExpectedHash:     opts.ExpectedHash,
 				Logger:           syncOpts.Logger,
 				Tracer:           syncOpts.Tracer,
+				Metrics:          syncOpts.Metrics,
 				DryRun:           syncOpts.DryRun,
 				Backfill:         toExecBackfill(opts.Backfill),
 				BeforeSync:       opts.BeforeSync,
@@ -764,6 +775,7 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 			RandFloat:            syncOpts.RandFloat,
 			Logger:               syncOpts.Logger,
 			Tracer:               syncOpts.Tracer,
+			Metrics:              syncOpts.Metrics,
 			DryRun:               syncOpts.DryRun,
 			Backfill:             toExecBackfill(opts.Backfill),
 			FailOnContention:     syncOpts.FailOnContention,
@@ -809,6 +821,7 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 			AcceptHazards:    opts.AcceptHazards,
 			ExpectedHash:     opts.ExpectedHash,
 			Tracer:           opts.Tracer,
+			Metrics:          opts.Metrics,
 			Logger:           opts.Logger,
 			Backfill:         toExecBackfill(opts.Backfill),
 			BeforeSync:       opts.BeforeSync,
@@ -832,6 +845,7 @@ func Apply(ctx context.Context, db *sql.DB, p *Plan, opts ApplyOpts) error {
 			AcceptHazards:        opts.AcceptHazards,
 			ExpectedHash:         opts.ExpectedHash,
 			Tracer:               opts.Tracer,
+			Metrics:              opts.Metrics,
 			Logger:               opts.Logger,
 			NonConcurrentIndexes: p.NonConcurrentIndexes,
 			LockTimeout:          cmp.Or(p.LockTimeout, exec.DefaultLockTimeout),
@@ -859,6 +873,9 @@ func Check(ctx context.Context, db *sql.DB, opts Options) error {
 	}
 
 	if len(p.Steps) > 0 {
+		if opts.Metrics != nil {
+			opts.Metrics.RecordDriftDetected(ctx, string(opts.Dialect), opts.TargetSchema)
+		}
 		return &plan.DriftError{Plan: p}
 	}
 
@@ -1361,6 +1378,67 @@ func Status(ctx context.Context, db *sql.DB, opts Options) (*StatusReport, error
 		FailedCount:  failed,
 		Latest:       toHistoryEntry(latestRec),
 	}, nil
+}
+
+// IsReady checks whether the database is ready for application traffic by inspecting
+// the latest migration state in grizzle_history. It reads migration state only with
+// zero side effects (no DDL, no table creation) and without acquiring any advisory locks.
+//
+// It returns:
+//   - (true, nil) if the latest migration record has status "applied" or "baseline".
+//   - (false, nil) if grizzle_history does not exist, is empty, or the latest record
+//     has a non-ready status ("partial", "failed", "in_progress").
+//   - (false, err) if database connectivity or the query fails.
+func IsReady(ctx context.Context, db *sql.DB, opts ...Option) (bool, error) {
+	if db == nil {
+		return false, fmt.Errorf("grizzle: database connection is nil")
+	}
+
+	var o Options
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+
+	if o.Dialect == DialectAuto {
+		d, err := detectDialect(ctx, db)
+		if err != nil {
+			return false, err
+		}
+		o.Dialect = d
+	}
+
+	targetSchemas := o.TargetSchemas
+	if len(targetSchemas) == 0 {
+		targetSchema := o.TargetSchema
+		if targetSchema == "" {
+			if o.Dialect == DialectSQLite {
+				targetSchema = "main"
+			} else {
+				targetSchema = "public"
+			}
+		}
+		targetSchemas = []string{targetSchema}
+	}
+
+	for _, s := range targetSchemas {
+		latest, err := history.GetLatest(ctx, db, string(o.Dialect), s)
+		if err != nil {
+			return false, fmt.Errorf("grizzle: querying readiness state: %w", err)
+		}
+		if latest == nil {
+			return false, nil
+		}
+		switch strings.ToLower(strings.TrimSpace(latest.Status)) {
+		case "applied", "baseline":
+			// ready for this schema
+		default:
+			return false, nil
+		}
+	}
+
+	return true, nil
 }
 
 // Baseline marks an existing database as synchronized with the desired schema,

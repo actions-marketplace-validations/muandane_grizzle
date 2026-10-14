@@ -279,6 +279,9 @@ type Options struct {
 
 	// Tracer specifies an optional tracer (OpenTelemetry or custom) for observing migrations.
 	Tracer Tracer
+
+	// Metrics specifies an optional metrics recorder (OpenTelemetry or custom) for observing migrations.
+	Metrics Metrics
 }
 
 // Tracer defines the interface for tracing Grizzle lifecycle events.
@@ -286,6 +289,9 @@ type Tracer = exec.Tracer
 
 // Span represents an active trace span recorded by a Tracer.
 type Span = exec.Span
+
+// Metrics defines the interface for recording Grizzle operational metrics.
+type Metrics = exec.Metrics
 
 // BackfillFunc defines the hook function signature for batch backfilling columns outside the DDL lock window.
 type BackfillFunc func(ctx context.Context, tx *sql.Tx, table, oldCol, newCol string) error
@@ -319,6 +325,13 @@ func WithLogger(l *slog.Logger) Option {
 func WithTracer(t Tracer) Option {
 	return func(o *Options) {
 		o.Tracer = t
+	}
+}
+
+// WithMetrics sets the metrics recorder.
+func WithMetrics(m Metrics) Option {
+	return func(o *Options) {
+		o.Metrics = m
 	}
 }
 

@@ -216,6 +216,9 @@ type Options struct {
 
     // Tracer receives lifecycle spans (sync start/end, step execution, lock wait).
     Tracer Tracer
+
+    // Metrics receives operational metrics (migration_duration_seconds, drift_detected, lock_wait_seconds).
+    Metrics Metrics
 }
 ```
 
@@ -593,6 +596,9 @@ The `RENAME_AMBIGUOUS` hazard description and the interactive summary remediatio
 
 ### Invariant 8: History and drift detection
 Applied plans are audited in `grizzle_history`. `Check()` provides read-only schema drift verification. A failed success-path history write does not fail the applied migration: it is logged at ERROR and surfaced as a typed non-fatal error (`errors.Is(err, grizzle.ErrHistoryRecord)`); failure-path history write failures are logged and never swallowed.
+
+### Invariant 9: Readiness probe
+`grizzle.IsReady(ctx, db, opts...)` inspects the latest migration record in `grizzle_history` with zero side effects: it never executes DDL, never creates tables, and never acquires advisory locks. It returns `(true, nil)` when the latest record has status `"applied"` or `"baseline"`, `(false, nil)` when unmigrated or ending in a non-ready status (`"failed"`, `"partial"`), and `(false, err)` on database connectivity failure.
 
 ## 5. Error taxonomy
 
