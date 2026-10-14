@@ -652,6 +652,25 @@ type DestructiveViolationError struct {
 | `L007` | `INFO` | CHECK constraint uses PostgreSQL's auto-generated name (`table[_column]_check[n]`); prefer an explicit `CONSTRAINT name CHECK` |
 | `L008` | `WARNING` | Table has `ENABLE ROW LEVEL SECURITY` but declares zero policies — every role is locked out |
 | `L009` | `ERROR` | DML statement (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`) declared in `SchemaSQL` — it is silently ignored by automigrations; move seed data to `SeedSQL` |
+| `L010` | `ERROR` | Trigger references a routine not declared in `SchemaSQL` or catalog |
+| `L011` | `WARNING` | `CREATE EXTENSION` without an explicit `VERSION 'x.y'` |
+| `L012` | `ERROR` | Seed DML in `SeedSQL` lacks an `ON CONFLICT` clause or idempotent guard |
+| `L013` | `ERROR` | Schema uses features unsupported on SQLite (e.g. `COMMENT ON`, RLS, or enum types) |
+
+### Strict Profile Rules (`--profile strict`)
+
+The `strict` profile enables standard rules plus high-impact production hygiene checks:
+
+| Rule | Severity | Check |
+| :--- | :--- | :--- |
+| `L014` | `ERROR` | Primary key column uses an unapproved data type; requires `BIGINT`, `INTEGER`, `SMALLINT`, or `UUID` |
+| `L022` | `ERROR` | Table or column name collides with a reserved SQL keyword (e.g. `user`, `order`, `table`) |
+| `L044` | `WARNING` | Boolean column declares no `DEFAULT`; recommend `DEFAULT false` or `DEFAULT true` to prevent tri-state `NULL` |
+| `L047` | `ERROR` | Table declares duplicate indexes covering the exact same columns and access method |
+| `L048` | `WARNING` | Single-column index is redundant because an existing composite index covers the column as its leading prefix |
+
+> [!TIP]
+> For the complete 80+ rule catalog derived from industry database reliability engineering and production standards, see [docs/LINTER_SPEC.md](LINTER_SPEC.md).
 
 Severity semantics:
 
