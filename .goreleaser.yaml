@@ -41,7 +41,7 @@ checksum:
 # the Update Changelog workflow (`on: release: types: [released]`) does not run.
 release:
   prerelease: auto
-  mode: replace
+  mode: keep-existing
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
