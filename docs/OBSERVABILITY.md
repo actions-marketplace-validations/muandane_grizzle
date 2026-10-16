@@ -12,6 +12,12 @@ To keep Grizzle lightweight and embeddable, the core library (`github.com/muanda
 github.com/muandane/grizzle/otelgrizzle
 ```
 
+Install it alongside the core module:
+
+```bash
+go get github.com/muandane/grizzle/otelgrizzle@v0.2.0
+```
+
 Applications that do not use OpenTelemetry never download, compile, or link any OpenTelemetry packages.
 
 ```
