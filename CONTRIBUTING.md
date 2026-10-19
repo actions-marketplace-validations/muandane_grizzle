@@ -53,6 +53,16 @@ Entering the devenv shell installs hooks so checks run locally before they hit C
 
 Integration tests are not hooked (they need `devenv up`). Run `ci` before a PR that touches `internal/exec`, `internal/history`, or the public API.
 
+### Nested module workspace
+
+`otelgrizzle` is a nested module whose `go.mod` requires the tagged root release (`github.com/muandane/grizzle v0.2.0`). To develop both modules against the working tree instead, create a local workspace from the repo root:
+
+```bash
+go work init . ./otelgrizzle
+```
+
+`go.work` is local-only and gitignored; it never affects published modules.
+
 ---
 
 ## Architectural layering

@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - Pruned 292 lines of obsolete dead code: legacy single-column backfill helpers (`buildCopyBackfillSQL`, `lookupSingleColumnPK`), ad-hoc `cmd/grizzle/devurl.go`, uncalled `FormatGrantKey`, `GenerateAlterSubscriptionApplySQL`, `GenerateValidateFKSQL`, and deprecated `AcquireAdvisoryLock`.
 
+### Fixed
+- **`otelgrizzle` Published as `otelgrizzle/v0.2.0`**: `github.com/muandane/grizzle/otelgrizzle` now requires `github.com/muandane/grizzle v0.2.0` and no longer carries the development-only `replace` directive, so consumers resolve the tagged module instead of a pseudo-version.
+
 ## [v0.1.0] - 2026-10-13
 
 ### Added
